@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>独立 401 重登录工具</title>
+  <style>
+    :root { color-scheme: light; --bg:#f4f6f8; --card:#fff; --line:#dcdfe6; --text:#20232a; --muted:#6b7280; --brand:#2563eb; --ok:#16a34a; --warn:#d97706; --bad:#dc2626; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
+    .wrap { max-width:1440px; margin:0 auto; padding:20px; }
+    header { background:linear-gradient(135deg,#1d4ed8,#2563eb 55%,#3b82f6); color:#fff; border-radius:12px; padding:22px 26px; margin-bottom:16px; box-shadow:0 8px 25px #1d4ed82b; }
+    header h1 { margin:0 0 4px; font-size:23px; }
+    header p { margin:0; opacity:.9; }
+    .grid { display:grid; grid-template-columns: minmax(300px, .9fr) minmax(500px, 1.8fr); gap:16px; align-items:start; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; margin-bottom:16px; box-shadow:0 2px 7px #00000009; }
+    h2 { font-size:16px; margin:0 0 12px; }
+    h3 { font-size:14px; margin:14px 0 7px; }
+    .hint { color:var(--muted); font-size:12px; }
+    .notice { border-left:4px solid var(--warn); background:#fff7ed; color:#7c2d12; padding:10px 12px; border-radius:5px; margin-bottom:14px; }
+    textarea, input, select { width:100%; border:1px solid var(--line); border-radius:6px; padding:9px 10px; font:inherit; background:#fff; color:var(--text); }
+    textarea { min-height:150px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; }
+    input[type=file] { padding:7px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .row > .grow { flex:1; min-width:150px; }
+    button { border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--text); padding:8px 13px; cursor:pointer; font:inherit; }
+    button:hover { border-color:var(--brand); color:var(--brand); }
+    button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+    button.success { background:var(--ok); color:#fff; border-color:var(--ok); }
+    button.danger { color:var(--bad); border-color:#fecaca; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .statbar { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 0; }
+    .stat { border:1px solid var(--line); border-radius:7px; padding:6px 10px; background:#fafafa; }
+    .stat b { margin-left:4px; }
+    .progress { height:9px; border-radius:9px; background:#e5e7eb; overflow:hidden; margin:9px 0; }
+    .progress > div { height:100%; background:var(--brand); transition:width .25s; }
+    .job { background:#eff6ff; border:1px solid #bfdbfe; border-radius:7px; padding:10px; margin-top:12px; }
+    .table-wrap { overflow:auto; max-height:640px; border:1px solid var(--line); border-radius:7px; }
+    table { width:100%; border-collapse:collapse; min-width:760px; }
+    th, td { padding:9px 8px; border-bottom:1px solid #eef0f3; text-align:left; vertical-align:top; white-space:nowrap; }
+    th { position:sticky; top:0; background:#f8fafc; z-index:1; font-weight:600; }
+    tr:last-child td { border-bottom:0; }
+    .tag { display:inline-block; border-radius:999px; padding:2px 8px; font-size:12px; background:#eef2ff; color:#3730a3; }
+    .tag.ok { background:#dcfce7; color:#166534; } .tag.bad { background:#fee2e2; color:#991b1b; } .tag.warn { background:#fef3c7; color:#92400e; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:12px; }
+    .proxy-list { max-height:220px; overflow:auto; margin-top:10px; }
+    .proxy-item { display:flex; gap:8px; align-items:center; border-bottom:1px solid #f0f1f3; padding:6px 0; }
+    .proxy-item span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+    #toast { position:fixed; right:20px; bottom:20px; z-index:10; max-width:420px; padding:11px 14px; border-radius:7px; background:#111827; color:#fff; display:none; box-shadow:0 5px 20px #0003; }
+    @media (max-width:900px) { .wrap { padding:10px; } .grid { grid-template-columns:1fr; } header { padding:18px; } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>独立 401 重登录工具</h1>
+    <p>独立账号库 · 独立代理池 · 默认密码 + 2FA 登录 · 支持 Sub2API JSON</p>
+  </header>
+
+  <div class="notice">
+    这是独立工具，不读取主项目的账号库或代理池。所有导入的密码、TOTP、AT/RT/ID 和代理都会保存在本工具的本地 SQLite 中，请只在可信网络使用。
+  </div>
+
+  <div class="grid">
+    <section>
+      <div class="card">
+        <h2>导入账号</h2>
+        <div class="row">
+          <label class="grow">导入格式
+            <select id="importKind">
+              <option value="sub2api">Sub2API JSON（默认）</option>
+              <option value="password_2fa">邮箱----密码----2FA</option>
+            </select>
+          </label>
+          <label class="grow">选择文件
+            <input id="accountFile" type="file" accept=".json,.txt,application/json,text/plain" />
+          </label>
+        </div>
+        <textarea id="accountText" placeholder="Sub2API JSON 粘贴到这里；或切换格式后输入：\nuser@example.com----OpenAI密码----JBSWY3DPEHPK3PXP"></textarea>
+        <div class="toolbar">
+          <button class="primary" id="importBtn">导入账号</button>
+          <button id="clearAccountsBtn">清空账号库</button>
+        </div>
+        <div class="hint">同邮箱重复导入会合并非空字段；密码+2FA 格式要求三段都填写。</div>
+      </div>
+
+      <div class="card">
+        <h2>独立代理池</h2>
+        <textarea id="proxyText" style="min-height:105px" placeholder="每行一个代理，例如：\nsocks5://user:pass@host:1080\nhttp://host:8080"></textarea>
+        <div class="toolbar">
+          <button class="primary" id="importProxyBtn">导入代理</button>
+          <button id="clearProxyBtn">清空代理池</button>
+        </div>
+        <div class="hint">任务每次领取当前租用次数最少的代理；重试会优先切换到其他代理。代理池为空时使用直连。</div>
+        <div class="proxy-list" id="proxyList"></div>
+      </div>
+
+      <div class="card">
+        <h2>任务设置</h2>
+        <div class="row">
+          <label class="grow">并发<input id="concurrency" type="number" min="1" max="20" /></label>
+          <label class="grow">额度超时（秒）<input id="quotaTimeout" type="number" min="5" max="120" /></label>
+          <label class="grow">登录超时（秒）<input id="loginTimeout" type="number" min="30" max="900" /></label>
+          <label class="grow">失败重试次数<input id="retryCount" type="number" min="0" max="5" /></label>
+        </div>
+        <button class="primary" id="saveSettingsBtn" style="margin-top:10px">保存任务设置</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h2 style="margin:0">账号列表</h2>
+          <span class="hint">默认导入 Sub2API 的 credentials 字段</span>
+        </div>
+        <div class="statbar" id="stats"></div>
+        <div class="toolbar">
+          <button class="primary" id="checkBtn">检查额度 / 401</button>
+          <button class="success" id="reloginBtn">密码 + 2FA 重登录</button>
+          <button id="exportSub2Btn">导出 Sub2API</button>
+          <button id="exportPwdBtn">导出密码 + 2FA</button>
+          <button id="selectAllBtn">全选 / 取消全选</button>
+          <button id="refreshBtn">刷新</button>
+        </div>
+        <div id="jobBox"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th><input type="checkbox" id="checkAll" /></th><th>状态</th><th>邮箱</th><th>密码</th><th>2FA</th><th>Workspace / Account</th><th>额度</th><th>最后错误</th><th>操作</th></tr></thead>
+            <tbody id="accountRows"></tbody>
+          </table>
+        </div>
+        <div class="hint" style="margin-top:9px">重登录只使用导入的密码和 TOTP，不会请求邮箱验证码；成功后会保存新的 AT/RT/ID。</div>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+  const state = { accounts: [], proxies: [], selected: new Set(), job: null, poller: null }
+  const $ = (id) => document.getElementById(id)
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
+  function toast(message, error = false) { const node = $('toast'); node.textContent = message; node.style.display = 'block'; node.style.background = error ? '#991b1b' : '#111827'; clearTimeout(toast.timer); toast.timer = setTimeout(() => { node.style.display = 'none' }, 4200) }
+  async function api(path, options = {}) {
+    const response = await fetch(path, { headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options })
+    if (!response.ok) { let detail = ''; try { const body = await response.json(); detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail || body) } catch (_) { detail = await response.text() }; throw new Error(detail || `HTTP ${response.status}`) }
+    return response.json()
+  }
+  function selectedIds() { return [...state.selected].filter((id) => state.accounts.some((row) => row.id === id)) }
+  function statusTag(status) { const map = { imported:['待检查',''], active:['存活','ok'], revived:['已复活','ok'], '401':['401','bad'], deactivated:['已停用','bad'], error:['错误','bad'] }; const value = map[status] || [status || '未知','warn']; return `<span class="tag ${value[1]}">${esc(value[0])}</span>` }
+  function formatQuota(quota) { if (!quota || typeof quota !== 'object' || !Object.keys(quota).length) return '<span class="hint">—</span>'; const primary = quota.primary || {}; const balance = quota.credits_balance == null ? '' : `余额 ${quota.credits_balance}`; const used = primary.used_percent == null ? '' : `主窗口 ${primary.used_percent}%`; return esc([balance, used].filter(Boolean).join(' · ') || '已返回') }
+  function render() {
+    const counts = state.accounts.reduce((out, row) => { out.total++; out[row.status] = (out[row.status] || 0) + 1; return out }, { total: 0 })
+    $('stats').innerHTML = [['总数', counts.total], ['存活', (counts.active || 0) + (counts.revived || 0)], ['401', counts['401'] || 0], ['停用', counts.deactivated || 0], ['已选', selectedIds().length]].map(([name, value]) => `<div class="stat">${name}<b>${value}</b></div>`).join('')
+    $('accountRows').innerHTML = state.accounts.map((row) => `<tr>
+      <td><input type="checkbox" data-select="${row.id}" ${state.selected.has(row.id) ? 'checked' : ''}></td>
+      <td>${statusTag(row.status)}</td>
+      <td class="mono">${esc(row.email)}</td>
+      <td>${row.password ? '<span class="tag ok">有</span>' : '<span class="tag bad">缺失</span>'}</td>
+      <td>${row.totp_secret ? '<span class="tag ok">有</span>' : '<span class="tag bad">缺失</span>'}</td>
+      <td class="mono">${esc(row.chatgpt_account_id || '个人账号')}</td>
+      <td>${formatQuota(row.quota)}</td>
+      <td title="${esc(row.last_error || '')}">${esc((row.last_error || '').slice(0, 55) || '—')}</td>
+      <td><button class="danger" data-delete="${row.id}">删除</button></td>
+    </tr>`).join('') || '<tr><td colspan="9" class="hint" style="text-align:center;padding:30px">还没有账号，请先导入</td></tr>'
+    $('checkAll').checked = state.accounts.length > 0 && selectedIds().length === state.accounts.length
+    renderProxies()
+  }
+  function renderProxies() { $('proxyList').innerHTML = state.proxies.map((row) => `<div class="proxy-item"><span class="mono" title="${esc(row.proxy)}">${esc(row.proxy)}</span><small class="hint">租用 ${row.lease_count}</small><button class="danger" data-proxy-delete="${row.id}">删除</button></div>`).join('') || '<div class="hint">代理池为空，将使用直连</div>' }
+  async function loadAll() { const [accounts, proxies, settings] = await Promise.all([api('/api/accounts'), api('/api/proxies'), api('/api/settings')]); state.accounts = accounts.items || []; state.proxies = proxies.items || []; $('concurrency').value = settings.settings.concurrency; $('quotaTimeout').value = settings.settings.quota_timeout; $('loginTimeout').value = settings.settings.login_timeout; $('retryCount').value = settings.settings.retry_count; state.selected = new Set([...state.selected].filter((id) => state.accounts.some((row) => row.id === id))); render() }
+  async function importAccounts() { const text = $('accountText').value.trim(); if (!text) return toast('请粘贴内容或选择文件', true); try { const result = await api('/api/import', { method:'POST', body: JSON.stringify({ text, kind: $('importKind').value }) }); $('accountText').value = ''; toast(`已导入 ${result.imported} 个账号`); await loadAll() } catch (error) { toast(error.message, true) } }
+  async function startJob(kind) { const ids = selectedIds(); if (!ids.length) return toast('请先选择账号', true); try { const result = await api(kind === 'quota' ? '/api/check' : '/api/relogin', { method:'POST', body: JSON.stringify({ account_ids: ids }) }); state.job = result.job; renderJob(); pollJob() } catch (error) { toast(error.message, true) } }
+  function renderJob() { const job = state.job; if (!job) { $('jobBox').innerHTML = ''; return }; const percent = job.total ? Math.floor(job.done * 100 / job.total) : 0; $('jobBox').innerHTML = `<div class="job"><div><b>${job.kind === 'quota' ? '额度查询' : '密码 + 2FA 重登录'}</b> · ${job.status}</div><div class="progress"><div style="width:${percent}%"></div></div><div class="hint">${job.done} / ${job.total} · 成功 ${job.success} · 失败 ${job.failed} · 并发 ${job.concurrency}</div></div>` }
+  async function pollJob() { if (!state.job || state.poller) return; state.poller = setInterval(async () => { try { const result = await api(`/api/jobs/${state.job.id}`); state.job = result.job; renderJob(); if (['done','done_with_errors'].includes(state.job.status)) { clearInterval(state.poller); state.poller = null; await loadAll(); toast(state.job.status === 'done' ? '任务完成' : '任务完成，但有失败账号') } } catch (error) { clearInterval(state.poller); state.poller = null; toast(error.message, true) } }, 800) }
+  function download(path) { const ids = selectedIds(); const suffix = ids.length ? `?account_ids=${encodeURIComponent(ids.join(','))}` : ''; const link = document.createElement('a'); link.href = path + suffix; link.download = ''; document.body.appendChild(link); link.click(); link.remove() }
+
+  $('accountFile').addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (file) $('accountText').value = await file.text() })
+  $('importBtn').onclick = importAccounts
+  $('importProxyBtn').onclick = async () => { const text = $('proxyText').value.trim(); if (!text) return toast('请先输入代理', true); try { const result = await api('/api/proxies/import', { method:'POST', body:JSON.stringify({ text }) }); $('proxyText').value = ''; toast(`已导入 ${result.imported} 条代理`); await loadAll() } catch (error) { toast(error.message, true) } }
+  $('clearAccountsBtn').onclick = async () => { if (!confirm('确定清空独立账号库？')) return; await api('/api/accounts/clear', { method:'POST' }); state.selected.clear(); await loadAll(); toast('账号库已清空') }
+  $('clearProxyBtn').onclick = async () => { if (!confirm('确定清空独立代理池？')) return; await api('/api/proxies/clear', { method:'POST' }); await loadAll(); toast('代理池已清空') }
+  $('saveSettingsBtn').onclick = async () => { try { await api('/api/settings', { method:'POST', body:JSON.stringify({ concurrency:Number($('concurrency').value), quota_timeout:Number($('quotaTimeout').value), login_timeout:Number($('loginTimeout').value), retry_count:Number($('retryCount').value) }) }); toast('任务设置已保存') } catch (error) { toast(error.message, true) } }
+  $('checkBtn').onclick = () => startJob('quota'); $('reloginBtn').onclick = () => startJob('relogin'); $('exportSub2Btn').onclick = () => download('/api/export/sub2api'); $('exportPwdBtn').onclick = () => download('/api/export/password-2fa'); $('refreshBtn').onclick = () => loadAll().catch((error) => toast(error.message, true));
+  $('selectAllBtn').onclick = () => { if (selectedIds().length === state.accounts.length) state.selected.clear(); else state.accounts.forEach((row) => state.selected.add(row.id)); render() }
+  $('checkAll').onchange = (event) => { if (event.target.checked) state.accounts.forEach((row) => state.selected.add(row.id)); else state.selected.clear(); render() }
+  $('accountRows').addEventListener('change', (event) => { const id = Number(event.target.dataset.select); if (!id) return; if (event.target.checked) state.selected.add(id); else state.selected.delete(id); render() })
+  $('accountRows').addEventListener('click', async (event) => { const id = Number(event.target.dataset.delete); if (!id || !confirm('确定删除这个账号？')) return; try { await api(`/api/accounts/${id}`, { method:'DELETE' }); state.selected.delete(id); await loadAll() } catch (error) { toast(error.message, true) } })
+  $('proxyList').addEventListener('click', async (event) => { const id = Number(event.target.dataset.proxyDelete); if (!id) return; try { await api(`/api/proxies/${id}`, { method:'DELETE' }); await loadAll() } catch (error) { toast(error.message, true) } })
+  loadAll().catch((error) => toast(`服务连接失败：${error.message}`, true))
+</script>
+</body>
+</html>

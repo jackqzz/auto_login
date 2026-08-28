@@ -1,0 +1,6 @@
+# Runtime dependencies. AuthFlow and its HTTP/mail dependencies are provided by
+# the parent project environment (see README.md).
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+
