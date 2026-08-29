@@ -30,6 +30,28 @@
     button.danger { color:var(--bad); border-color:#fecaca; }
     button:disabled { opacity:.55; cursor:not-allowed; }
     .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .accordion { padding:0; overflow:hidden; }
+    .accordion-toggle { width:100%; display:flex; justify-content:space-between; align-items:center; border:0; border-radius:0; padding:14px 16px; background:#f8fafc; font-weight:600; text-align:left; }
+    .accordion-toggle:hover { background:#eff6ff; color:var(--brand); }
+    .accordion-toggle .arrow { transition:transform .2s; font-size:16px; }
+    .accordion.collapsed .accordion-toggle .arrow { transform:rotate(-90deg); }
+    .accordion-body { padding:0 16px 16px; }
+    .accordion.collapsed .accordion-body { display:none; }
+    .stat-card { margin-bottom:16px; }
+    .stat-card .statbar { margin-top:0; }
+    .account-card { margin-bottom:16px; }
+    .account-card-header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .account-card-header h2 { margin:0; }
+    .drawer { position:fixed; inset:0; z-index:20; visibility:hidden; transition:visibility .2s; }
+    .drawer.open { visibility:visible; }
+    .drawer-mask { position:absolute; inset:0; background:#11182766; opacity:0; transition:opacity .2s; }
+    .drawer.open .drawer-mask { opacity:1; }
+    .drawer-panel { position:absolute; top:0; right:0; width:min(460px, 94vw); height:100%; overflow:auto; background:var(--card); box-shadow:-8px 0 28px #0003; transform:translateX(100%); transition:transform .25s; padding:20px; }
+    .drawer.open .drawer-panel { transform:translateX(0); }
+    .drawer-header { display:flex; align-items:center; justify-content:space-between; gap:10px; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px; }
+    .drawer-header h2 { margin:0; }
+    .drawer-section { border-bottom:1px solid #eef0f3; padding-bottom:17px; margin-bottom:17px; }
+    .drawer-section:last-child { border-bottom:0; margin-bottom:0; }
     .export-picker { display:inline-flex; align-items:stretch; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#fff; }
     .export-picker select { width:auto; min-width:175px; border:0; border-right:1px solid var(--line); border-radius:0; padding:7px 30px 7px 10px; outline:none; }
     .export-picker button { border:0; border-radius:0; min-width:74px; background:#fff; }
@@ -67,89 +89,98 @@
     这是独立工具，不读取主项目的账号库或代理池。所有导入的密码、TOTP、AT/RT/ID 和代理都会保存在本工具的本地 SQLite 中，请只在可信网络使用。
   </div>
 
-  <div class="grid">
-    <section>
-      <div class="card">
-        <h2>导入账号</h2>
-        <div class="row">
-          <label class="grow">导入格式
-            <select id="importKind">
-              <option value="sub2api">Sub2API JSON（默认）</option>
-              <option value="password_2fa">邮箱----密码----2FA（可选 Workspace ID）</option>
-            </select>
-          </label>
-          <label class="grow">选择文件
-            <input id="accountFile" type="file" accept=".json,.txt,application/json,text/plain" />
-          </label>
-        </div>
-        <textarea id="accountText" placeholder="Sub2API JSON 粘贴到这里；或切换格式后输入：\nuser@example.com----OpenAI密码----JBSWY3DPEHPK3PXP\n指定空间时：user@example.com----OpenAI密码----JBSWY3DPEHPK3PXP----workspace_id"></textarea>
-        <div class="toolbar">
-          <button class="primary" id="importBtn">导入账号</button>
-          <button id="clearAccountsBtn">清空账号库</button>
-        </div>
-        <div class="hint" style="line-height:1.65">
-          三段格式 <span class="mono">邮箱----密码----2FA</span>：登录时由 OpenAI 返回的空间列表决定，使用列表中的第一个空间；适合只有一个空间或不要求固定空间的账号。<br>
-          四段格式 <span class="mono">邮箱----密码----2FA----workspace_id</span>：强制选择指定 Workspace，适合一个账号属于多个空间的情况；第四段填写 Workspace ID，不会随机选择。<br>
-          同邮箱重复导入会合并非空字段；账号库会保留已保存的 Workspace ID。密码+2FA 导出仍是三段格式，如需固定空间请使用四段格式重新导入。
-        </div>
+  <div class="card accordion" id="importCard">
+    <button class="accordion-toggle" id="importToggle" aria-expanded="true">
+      <span>导入账号 <small class="hint">默认 Sub2API JSON，也支持密码 + 2FA</small></span>
+      <span class="arrow">⌄</span>
+    </button>
+    <div class="accordion-body" id="importBody">
+      <div class="row">
+        <label class="grow">导入格式
+          <select id="importKind">
+            <option value="sub2api">Sub2API JSON（默认）</option>
+            <option value="password_2fa">邮箱----密码----2FA（可选 Workspace ID）</option>
+          </select>
+        </label>
+        <label class="grow">选择文件
+          <input id="accountFile" type="file" accept=".json,.txt,application/json,text/plain" />
+        </label>
       </div>
+      <textarea id="accountText" placeholder="Sub2API JSON 粘贴到这里；或切换格式后输入：\nuser@example.com----OpenAI密码----JBSWY3DPEHPK3PXP\n指定空间时：user@example.com----OpenAI密码----JBSWY3DPEHPK3PXP----workspace_id"></textarea>
+      <div class="toolbar">
+        <button class="primary" id="importBtn">导入账号</button>
+        <button id="clearAccountsBtn">清空账号库</button>
+      </div>
+      <div class="hint" style="line-height:1.65">
+        三段格式 <span class="mono">邮箱----密码----2FA</span>：登录时由 OpenAI 返回的空间列表决定，使用第一个空间；适合只有一个空间或不要求固定空间的账号。<br>
+        四段格式 <span class="mono">邮箱----密码----2FA----workspace_id</span>：强制选择指定 Workspace，适合一个账号属于多个空间的情况；不会随机选择。<br>
+        同邮箱重复导入会合并非空字段；账号库会保留已保存的 Workspace ID。密码+2FA 导出仍是三段格式，如需固定空间请使用四段格式重新导入。
+      </div>
+    </div>
+  </div>
 
-      <div class="card">
-        <h2>独立代理池</h2>
-        <textarea id="proxyText" style="min-height:105px" placeholder="每行一个代理，例如：\nsocks5://user:pass@host:1080\nhttp://host:8080"></textarea>
-        <div class="toolbar">
-          <button class="primary" id="importProxyBtn">导入代理</button>
-          <button id="clearProxyBtn">清空代理池</button>
-        </div>
-        <div class="hint">任务每次领取当前租用次数最少的代理；重试会优先切换到其他代理。代理池为空时使用直连。</div>
-        <div class="proxy-list" id="proxyList"></div>
+  <div class="card stat-card">
+    <div class="account-card-header">
+      <h2>账号情况</h2>
+      <div class="row">
+        <span class="hint">当前账号库实时统计</span>
+        <button id="openSettingsBtn">代理池与任务设置</button>
       </div>
+    </div>
+    <div class="statbar" id="stats"></div>
+  </div>
 
-      <div class="card">
-        <h2>任务设置</h2>
-        <div class="row">
-          <label class="grow">并发<input id="concurrency" type="number" min="1" max="20" /></label>
-          <label class="grow">额度超时（秒）<input id="quotaTimeout" type="number" min="5" max="120" /></label>
-          <label class="grow">登录超时（秒）<input id="loginTimeout" type="number" min="30" max="900" /></label>
-          <label class="grow">失败重试次数<input id="retryCount" type="number" min="0" max="5" /></label>
-        </div>
-        <button class="primary" id="saveSettingsBtn" style="margin-top:10px">保存任务设置</button>
+  <div class="card account-card">
+    <div class="account-card-header">
+      <h2>账号列表</h2>
+      <span class="hint">重登录只使用密码 + TOTP，不请求邮箱验证码</span>
+    </div>
+    <div class="toolbar">
+      <button class="primary" id="checkBtn">检查额度 / 401</button>
+      <button class="success" id="reloginBtn">密码 + 2FA 重登录</button>
+      <div class="export-picker">
+        <select id="exportKind" aria-label="导出格式">
+          <option value="cpa">CPA（单个 JSON / 批量 ZIP）</option>
+          <option value="sub2api">Sub2API JSON</option>
+          <option value="password-2fa">邮箱----密码----2FA</option>
+        </select>
+        <button class="primary" id="exportBtn">导出</button>
       </div>
-    </section>
-
-    <section>
-      <div class="card">
-        <div class="row" style="justify-content:space-between">
-          <h2 style="margin:0">账号列表</h2>
-          <span class="hint">默认导入 Sub2API 的 credentials 字段</span>
-        </div>
-        <div class="statbar" id="stats"></div>
-        <div class="toolbar">
-          <button class="primary" id="checkBtn">检查额度 / 401</button>
-          <button class="success" id="reloginBtn">密码 + 2FA 重登录</button>
-          <div class="export-picker">
-            <select id="exportKind" aria-label="导出格式">
-              <option value="cpa">CPA（单个 JSON / 批量 ZIP）</option>
-              <option value="sub2api">Sub2API JSON</option>
-              <option value="password-2fa">邮箱----密码----2FA</option>
-            </select>
-            <button class="primary" id="exportBtn">导出</button>
-          </div>
-          <button id="selectAllBtn">全选 / 取消全选</button>
-          <button id="refreshBtn">刷新</button>
-        </div>
-        <div id="jobBox"></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th><input type="checkbox" id="checkAll" /></th><th>状态</th><th>邮箱</th><th>密码</th><th>2FA</th><th>Workspace / Account</th><th>额度</th><th>最后错误</th><th>操作</th></tr></thead>
-            <tbody id="accountRows"></tbody>
-          </table>
-        </div>
-        <div class="hint" style="margin-top:9px">重登录只使用导入的密码和 TOTP，不会请求邮箱验证码；成功后会保存新的 AT/RT/ID。</div>
-      </div>
-    </section>
+      <button id="selectAllBtn">全选 / 取消全选</button>
+      <button id="refreshBtn">刷新</button>
+    </div>
+    <div id="jobBox"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th><input type="checkbox" id="checkAll" /></th><th>状态</th><th>邮箱</th><th>密码</th><th>2FA</th><th>Workspace / Account</th><th>额度</th><th>最后错误</th><th>操作</th></tr></thead>
+        <tbody id="accountRows"></tbody>
+      </table>
+    </div>
   </div>
 </div>
+<aside class="drawer" id="settingsDrawer" aria-hidden="true">
+  <div class="drawer-mask" id="drawerMask"></div>
+  <div class="drawer-panel" role="dialog" aria-label="代理池与任务设置">
+    <div class="drawer-header"><h2>代理池与任务设置</h2><button id="closeSettingsBtn">关闭</button></div>
+    <div class="drawer-section">
+      <h3>独立代理池</h3>
+      <textarea id="proxyText" style="min-height:105px" placeholder="每行一个代理，例如：\nsocks5://user:pass@host:1080\nhttp://host:8080"></textarea>
+      <div class="toolbar"><button class="primary" id="importProxyBtn">导入代理</button><button id="clearProxyBtn">清空代理池</button></div>
+      <div class="hint">任务每次领取当前租用次数最少的代理；重试会优先切换到其他代理。代理池为空时使用直连。</div>
+      <div class="proxy-list" id="proxyList"></div>
+    </div>
+    <div class="drawer-section">
+      <h3>任务设置</h3>
+      <div class="row">
+        <label class="grow">并发<input id="concurrency" type="number" min="1" max="20" /></label>
+        <label class="grow">额度超时（秒）<input id="quotaTimeout" type="number" min="5" max="120" /></label>
+        <label class="grow">登录超时（秒）<input id="loginTimeout" type="number" min="30" max="900" /></label>
+        <label class="grow">失败重试次数<input id="retryCount" type="number" min="0" max="5" /></label>
+      </div>
+      <button class="primary" id="saveSettingsBtn" style="margin-top:10px">保存任务设置</button>
+    </div>
+  </div>
+</aside>
 <div id="toast"></div>
 <script>
   const state = { accounts: [], proxies: [], selected: new Set(), job: null, poller: null }
@@ -188,6 +219,13 @@
   function renderJob() { const job = state.job; if (!job) { $('jobBox').innerHTML = ''; return }; const percent = job.total ? Math.floor(job.done * 100 / job.total) : 0; $('jobBox').innerHTML = `<div class="job"><div><b>${job.kind === 'quota' ? '额度查询' : '密码 + 2FA 重登录'}</b> · ${job.status}</div><div class="progress"><div style="width:${percent}%"></div></div><div class="hint">${job.done} / ${job.total} · 成功 ${job.success} · 失败 ${job.failed} · 并发 ${job.concurrency}</div></div>` }
   async function pollJob() { if (!state.job || state.poller) return; state.poller = setInterval(async () => { try { const result = await api(`/api/jobs/${state.job.id}`); state.job = result.job; renderJob(); if (['done','done_with_errors'].includes(state.job.status)) { clearInterval(state.poller); state.poller = null; await loadAll(); toast(state.job.status === 'done' ? '任务完成' : '任务完成，但有失败账号') } } catch (error) { clearInterval(state.poller); state.poller = null; toast(error.message, true) } }, 800) }
   function download(path) { const ids = selectedIds(); const suffix = ids.length ? `?account_ids=${encodeURIComponent(ids.join(','))}` : ''; const link = document.createElement('a'); link.href = path + suffix; link.download = ''; document.body.appendChild(link); link.click(); link.remove() }
+
+  $('importToggle').onclick = () => { const card = $('importCard'); const collapsed = card.classList.toggle('collapsed'); $('importToggle').setAttribute('aria-expanded', String(!collapsed)) }
+  const drawer = $('settingsDrawer')
+  function closeSettings() { drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true') }
+  $('openSettingsBtn').onclick = () => { drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false') }
+  $('closeSettingsBtn').onclick = closeSettings
+  $('drawerMask').onclick = closeSettings
 
   $('accountFile').addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (file) $('accountText').value = await file.text() })
   $('importBtn').onclick = importAccounts
