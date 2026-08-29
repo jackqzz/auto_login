@@ -75,19 +75,23 @@
           <label class="grow">导入格式
             <select id="importKind">
               <option value="sub2api">Sub2API JSON（默认）</option>
-              <option value="password_2fa">邮箱----密码----2FA</option>
+              <option value="password_2fa">邮箱----密码----2FA（可选 Workspace ID）</option>
             </select>
           </label>
           <label class="grow">选择文件
             <input id="accountFile" type="file" accept=".json,.txt,application/json,text/plain" />
           </label>
         </div>
-        <textarea id="accountText" placeholder="Sub2API JSON 粘贴到这里；或切换格式后输入：\nuser@example.com----OpenAI密码----JBSWY3DPEHPK3PXP"></textarea>
+        <textarea id="accountText" placeholder="Sub2API JSON 粘贴到这里；或切换格式后输入：\nuser@example.com----OpenAI密码----JBSWY3DPEHPK3PXP\n指定空间时：user@example.com----OpenAI密码----JBSWY3DPEHPK3PXP----workspace_id"></textarea>
         <div class="toolbar">
           <button class="primary" id="importBtn">导入账号</button>
           <button id="clearAccountsBtn">清空账号库</button>
         </div>
-        <div class="hint">同邮箱重复导入会合并非空字段；密码+2FA 格式要求三段都填写。</div>
+        <div class="hint" style="line-height:1.65">
+          三段格式 <span class="mono">邮箱----密码----2FA</span>：登录时由 OpenAI 返回的空间列表决定，使用列表中的第一个空间；适合只有一个空间或不要求固定空间的账号。<br>
+          四段格式 <span class="mono">邮箱----密码----2FA----workspace_id</span>：强制选择指定 Workspace，适合一个账号属于多个空间的情况；第四段填写 Workspace ID，不会随机选择。<br>
+          同邮箱重复导入会合并非空字段；账号库会保留已保存的 Workspace ID。密码+2FA 导出仍是三段格式，如需固定空间请使用四段格式重新导入。
+        </div>
       </div>
 
       <div class="card">

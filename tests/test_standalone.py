@@ -133,6 +133,18 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual(payload["account_id"], "acct-cpa")
         self.assertEqual(payload["refresh_token"], "refresh-token")
 
+    def test_password_2fa_import_supports_optional_workspace_id(self):
+        from app import _parse_password_2fa
+
+        automatic = _parse_password_2fa(
+            "one@example.com----pass----JBSWY3DPEHPK3PXP"
+        )[0]
+        fixed = _parse_password_2fa(
+            "two@example.com----pass----JBSWY3DPEHPK3PXP----workspace-2"
+        )[0]
+        self.assertNotIn("chatgpt_account_id", automatic)
+        self.assertEqual(fixed["chatgpt_account_id"], "workspace-2")
+
 
 if __name__ == "__main__":
     unittest.main()

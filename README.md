@@ -19,13 +19,20 @@ cd /home/manq_dev/gpt-auto-register/401-relogin-web
 
 默认导入格式是 Sub2API JSON（支持 `accounts[].credentials` 结构）。工具会从 `credentials` 中读取邮箱、密码、2FA、AT/RT/ID 和 workspace/account id。
 
-也支持直接导入密码 + 2FA 文本，每行必须是：
+也支持直接导入密码 + 2FA 文本。默认三段格式为：
 
 ```text
 email@example.com----OpenAI密码----TOTP_SECRET
 ```
 
-空行和 `#` 开头的注释行会忽略。导入同一个邮箱会合并非空凭证，不会无故覆盖已有 AT/RT/ID。
+三段格式不会指定空间：登录时使用 OpenAI 返回的空间列表中的第一个空间。
+如果账号属于多个空间、需要固定目标，请使用扩展的四段格式：
+
+```text
+email@example.com----OpenAI密码----TOTP_SECRET----workspace_id
+```
+
+四段格式会强制调用指定 Workspace ID，不会随机选择。空行和 `#` 开头的注释行会忽略。导入同一个邮箱会合并非空凭证，不会无故覆盖已有 AT/RT/ID；已保存的 Workspace ID 也不会被一次三段格式的重复导入清空。
 
 ## 功能
 

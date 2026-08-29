@@ -294,14 +294,24 @@ def _parse_password_2fa(text: str) -> list[dict]:
         if not line or line.startswith("#"):
             continue
         parts = line.split("----")
-        if len(parts) != 3:
-            errors.append(f"第 {line_number} 行需要：邮箱----密码----2FA")
+        if len(parts) not in (3, 4):
+            errors.append(
+                f"第 {line_number} 行需要：邮箱----密码----2FA，"
+                "或邮箱----密码----2FA----workspace_id"
+            )
             continue
-        email, password, totp_secret = (part.strip() for part in parts)
+        email, password, totp_secret = (part.strip() for part in parts[:3])
+        workspace_id = parts[3].strip() if len(parts) == 4 else ""
         if "@" not in email or not password or not totp_secret:
             errors.append(f"第 {line_number} 行邮箱、密码、2FA 均不能为空")
             continue
-        rows.append({"email": email.lower(), "password": password, "totp_secret": totp_secret})
+        if len(parts) == 4 and not workspace_id:
+            errors.append(f"第 {line_number} 行 workspace_id 不能为空（不需要指定空间时请删除第四段）")
+            continue
+        row = {"email": email.lower(), "password": password, "totp_secret": totp_secret}
+        if workspace_id:
+            row["chatgpt_account_id"] = workspace_id
+        rows.append(row)
     if errors:
         raise HTTPException(400, {"message": "密码+2FA 导入格式错误", "errors": errors})
     return rows
