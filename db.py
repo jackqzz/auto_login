@@ -34,6 +34,7 @@ def init_db() -> None:
                 refresh_token TEXT NOT NULL DEFAULT '',
                 id_token TEXT NOT NULL DEFAULT '',
                 session_token TEXT NOT NULL DEFAULT '',
+                device_id TEXT NOT NULL DEFAULT '',
                 chatgpt_account_id TEXT NOT NULL DEFAULT '',
                 chatgpt_user_id TEXT NOT NULL DEFAULT '',
                 client_id TEXT NOT NULL DEFAULT '',
@@ -66,6 +67,11 @@ def init_db() -> None:
                 ('retry_count', '1');
             """
         )
+        account_columns = {
+            str(row[1]) for row in con.execute("PRAGMA table_info(accounts)").fetchall()
+        }
+        if "device_id" not in account_columns:
+            con.execute("ALTER TABLE accounts ADD COLUMN device_id TEXT NOT NULL DEFAULT ''")
         con.commit()
         con.close()
 
@@ -115,7 +121,7 @@ def upsert_account(data: dict) -> dict:
         key: str(data.get(key) or "").strip()
         for key in (
             "password", "totp_secret", "access_token", "refresh_token", "id_token",
-            "session_token", "chatgpt_account_id", "chatgpt_user_id", "client_id",
+            "session_token", "device_id", "chatgpt_account_id", "chatgpt_user_id", "client_id",
             "organization_id", "plan_type",
         )
     }
@@ -126,10 +132,10 @@ def upsert_account(data: dict) -> dict:
         con.execute(
             """
             INSERT INTO accounts(email,password,totp_secret,access_token,refresh_token,id_token,
-              session_token,chatgpt_account_id,chatgpt_user_id,client_id,organization_id,plan_type,
+              session_token,device_id,chatgpt_account_id,chatgpt_user_id,client_id,organization_id,plan_type,
               status,quota_json,last_error,last_checked_at,last_relogin_at,created_at,updated_at)
             VALUES (:email,:password,:totp_secret,:access_token,:refresh_token,:id_token,
-              :session_token,:chatgpt_account_id,:chatgpt_user_id,:client_id,:organization_id,:plan_type,
+              :session_token,:device_id,:chatgpt_account_id,:chatgpt_user_id,:client_id,:organization_id,:plan_type,
               :status,:quota_json,'',NULL,NULL,:now,:now)
             ON CONFLICT(email) DO UPDATE SET
               password=CASE WHEN excluded.password<>'' THEN excluded.password ELSE accounts.password END,
@@ -138,6 +144,7 @@ def upsert_account(data: dict) -> dict:
               refresh_token=CASE WHEN excluded.refresh_token<>'' THEN excluded.refresh_token ELSE accounts.refresh_token END,
               id_token=CASE WHEN excluded.id_token<>'' THEN excluded.id_token ELSE accounts.id_token END,
               session_token=CASE WHEN excluded.session_token<>'' THEN excluded.session_token ELSE accounts.session_token END,
+              device_id=CASE WHEN excluded.device_id<>'' THEN excluded.device_id ELSE accounts.device_id END,
               chatgpt_account_id=CASE WHEN excluded.chatgpt_account_id<>'' THEN excluded.chatgpt_account_id ELSE accounts.chatgpt_account_id END,
               chatgpt_user_id=CASE WHEN excluded.chatgpt_user_id<>'' THEN excluded.chatgpt_user_id ELSE accounts.chatgpt_user_id END,
               client_id=CASE WHEN excluded.client_id<>'' THEN excluded.client_id ELSE accounts.client_id END,
@@ -156,7 +163,7 @@ def upsert_account(data: dict) -> dict:
 
 def update_account(account_id: int, **values: Any) -> dict | None:
     allowed = {
-        "password", "totp_secret", "access_token", "refresh_token", "id_token", "session_token",
+        "password", "totp_secret", "access_token", "refresh_token", "id_token", "session_token", "device_id",
         "chatgpt_account_id", "chatgpt_user_id", "client_id", "organization_id", "plan_type",
         "status", "last_error", "last_checked_at", "last_relogin_at",
     }

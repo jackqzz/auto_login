@@ -125,4 +125,6 @@ email@example.com----OpenAI密码----TOTP_SECRET----workspace_id
 
 HTTP 402/403 会直接按停用处理。HTTP 402 表示 workspace 级停用：工具会把本地账号库中相同 `chatgpt_account_id` 的所有账号一起标记为 402，并在当前任务中一并计为失败。重新导入该 workspace 的新凭证后，才会解除本进程中的 402 拦截标记。
 
+Sub2API 导出会以重登录后新 AT 的 JWT 声明为身份来源，使用同一组 Codex `access_token`、`id_token`、`refresh_token`，校验 `id_token.at_hash`，并保存本次登录的 `device_id`。导入文件中的旧 `client_id`、邮箱或 Workspace 元数据不会覆盖新 AT 的声明，避免下载后导入 Sub2API 返回 401。
+
 账号凭证和代理都属于敏感数据，请只在可信网络中运行，必要时在反向代理层增加访问控制。

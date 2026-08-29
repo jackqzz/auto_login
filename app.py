@@ -202,7 +202,7 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                     account_id,
                     **{key: refreshed.get(key, "") for key in (
                         "access_token", "refresh_token", "id_token", "session_token",
-                        "chatgpt_account_id", "chatgpt_user_id", "client_id", "organization_id", "plan_type",
+                        "device_id", "chatgpt_account_id", "chatgpt_user_id", "client_id", "organization_id", "plan_type",
                     )},
                     status="revived",
                     last_error="",
@@ -444,43 +444,103 @@ def job(job_id: str) -> dict:
 
 
 def _sub2_account(account: dict) -> dict:
-    token = account.get("access_token", "")
+    token = str(account.get("access_token") or "").strip()
+    engine.validate_sub2_token_pair(token, account.get("id_token", ""))
     payload = engine.decode_jwt_payload(token)
     auth = payload.get("https://api.openai.com/auth") or {}
     profile = payload.get("https://api.openai.com/profile") or {}
-    account_id = account.get("chatgpt_account_id") or auth.get("chatgpt_account_id") or auth.get("account_id") or ""
-    user_id = account.get("chatgpt_user_id") or auth.get("chatgpt_user_id") or auth.get("user_id") or payload.get("sub") or ""
+    # AT 中的身份声明优先于导入文件元数据，避免重登录后仍带出旧的
+    # client_id / workspace_id，导致 Sub2API 用错 token family。
+    account_id = str(auth.get("chatgpt_account_id") or auth.get("account_id") or account.get("chatgpt_account_id") or "").strip()
+    user_id = str(auth.get("chatgpt_user_id") or auth.get("user_id") or account.get("chatgpt_user_id") or payload.get("sub") or "").strip()
+    email = str(profile.get("email") or account.get("email") or "").strip().lower()
+    client_id = str(payload.get("client_id") or engine.CODEX_CLIENT_ID).strip()
+    plan_type = str(auth.get("chatgpt_plan_type") or account.get("plan_type") or "team").strip() or "team"
+    device_id = str(account.get("device_id") or "").strip() or str(
+        uuid.uuid5(uuid.NAMESPACE_DNS, f"standalone-401-relogin:{account_id or email or 'personal'}")
+    )
+    id_payload = engine.decode_jwt_payload(account.get("id_token", ""))
+    id_auth = id_payload.get("https://api.openai.com/auth") or {}
+    organization_id = str(
+        id_auth.get("organization_id")
+        or auth.get("organization_id")
+        or auth.get("poid")
+        or account.get("organization_id")
+        or ""
+    ).strip()
     exp = int(payload.get("exp") or 0)
     expires = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)) if exp else ""
+    exported_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    account_user_id = f"{user_id}__{account_id}" if user_id and account_id else ""
+    extra = {
+        "email": email,
+        "source": "standalone_401_relogin",
+        "privacy_mode": "training_off",
+        "original_format": "codex-account",
+        "openai_oauth_responses_websockets_v2_mode": "off",
+        "openai_oauth_responses_websockets_v2_enabled": False,
+    }
+    live_identity = {
+        "plan": plan_type,
+        "email": email,
+        "user_id": user_id,
+        "client_id": client_id,
+        "account_id": account_id,
+        "plan_source": "oauth_access_token_claim",
+        "verified_at": exported_at,
+        "email_source": "oauth_access_token_claim",
+        "official_plan": plan_type,
+        "client_trusted": False,
+        "email_verified": True,
+        "user_id_source": "oauth_access_token_claim",
+        "account_user_id": account_user_id,
+        "identity_source": "oauth_access_token_claim",
+        "account_id_source": "oauth_access_token_claim",
+        "account_user_id_source": "oauth_access_token_claim",
+    }
     credentials = {
-        "name": profile.get("name") or account.get("email", ""),
+        "name": profile.get("name") or email,
         "type": "codex",
-        "email": account.get("email", ""),
+        "email": email,
+        "extra": extra,
         "password": account.get("password", ""),
         "totp_secret": account.get("totp_secret", ""),
         "access_token": token,
         "refresh_token": account.get("refresh_token", ""),
         "id_token": account.get("id_token", ""),
         "session_token": account.get("session_token", ""),
-        "client_id": account.get("client_id") or payload.get("client_id", ""),
+        "client_id": client_id,
         "account_id": account_id,
         "chatgpt_account_id": account_id,
         "chatgpt_user_id": user_id,
-        "plan_type": account.get("plan_type") or auth.get("chatgpt_plan_type") or "team",
+        "plan_type": plan_type,
+        "chatgpt_plan_type": plan_type,
+        "organization_id": organization_id,
         "workspace_id": account_id,
+        "device_id": device_id,
+        "oai_device_id": device_id,
         "expired": expires,
         "expires_at": expires,
         "expires_in": max(0, exp - int(time.time())) if exp else 0,
         "disabled": False,
+        "email_source": "oauth_access_token_claim",
+        "last_refresh": exported_at,
+        "live_identity": live_identity,
+        "outlook_email": email,
+        "identity_source": "oauth_access_token_claim",
+        "account_id_source": "oauth_access_token_claim",
+        "chatgpt_account_user_id": account_user_id,
     }
     return {
-        "name": account.get("email", ""),
+        "name": email,
+        "extra": extra,
         "type": "oauth",
         "platform": "openai",
         "priority": 1,
-        "plan_type": credentials["plan_type"],
+        "plan_type": plan_type,
         "concurrency": 10,
         "credentials": credentials,
+        "device_id": device_id,
         "group_ids": [4],
         "expires_at": exp,
         "auto_pause_on_expired": True,

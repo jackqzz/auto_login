@@ -2,6 +2,7 @@ import base64
 import json
 import tempfile
 import unittest
+import uuid
 from unittest import mock
 from pathlib import Path
 
@@ -144,6 +145,98 @@ class StandaloneTests(unittest.TestCase):
         )[0]
         self.assertNotIn("chatgpt_account_id", automatic)
         self.assertEqual(fixed["chatgpt_account_id"], "workspace-2")
+
+    def test_sub2_export_uses_new_token_identity_and_validates_at_hash(self):
+        access = jwt({
+            "sub": "new-user",
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "exp": 1890000000,
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "new-workspace",
+                "chatgpt_user_id": "new-user",
+                "chatgpt_plan_type": "team",
+            },
+            "https://api.openai.com/profile": {"email": "new@example.com"},
+        })
+        identity = jwt({
+            "at_hash": engine._oidc_at_hash(access),
+            "aud": [engine.CODEX_CLIENT_ID],
+        })
+        row = db.upsert_account({
+            "email": "old@example.com",
+            "access_token": access,
+            "id_token": identity,
+            "refresh_token": "rt",
+            "chatgpt_account_id": "old-workspace",
+            "client_id": "old-client",
+        })
+        document = app._sub2_account(db.get_account(row["id"]))
+        credentials = document["credentials"]
+        self.assertEqual(credentials["email"], "new@example.com")
+        self.assertEqual(credentials["chatgpt_account_id"], "new-workspace")
+        self.assertEqual(credentials["client_id"], engine.CODEX_CLIENT_ID)
+        self.assertEqual(
+            credentials["device_id"],
+            str(uuid.uuid5(uuid.NAMESPACE_DNS, "standalone-401-relogin:new-workspace")),
+        )
+
+    def test_sub2_export_rejects_mismatched_id_token(self):
+        access = jwt({"client_id": engine.CODEX_CLIENT_ID})
+        identity = jwt({"at_hash": "belongs-to-another-access-token"})
+        row = db.upsert_account({
+            "email": "bad@example.com",
+            "access_token": access,
+            "id_token": identity,
+        })
+        with self.assertRaisesRegex(ValueError, "at_hash"):
+            app._sub2_account(db.get_account(row["id"]))
+
+    def test_relogin_keeps_codex_token_family_and_device_id(self):
+        access = jwt({
+            "client_id": engine.CODEX_CLIENT_ID,
+            "https://api.openai.com/auth": {"chatgpt_account_id": "workspace-new"},
+            "https://api.openai.com/profile": {"email": "fresh@example.com"},
+        })
+        identity = jwt({"at_hash": engine._oidc_at_hash(access), "aud": [engine.CODEX_CLIENT_ID]})
+
+        class Result:
+            email = "fresh@example.com"
+            password = "pass"
+            totp_secret = "JBSWY3DPEHPK3PXP"
+            device_id = "device-new"
+
+            def to_dict(self):
+                return {
+                    "email": self.email,
+                    "password": self.password,
+                    "totp_secret": self.totp_secret,
+                    "access_token": "web-access",
+                    "id_token": "web-id",
+                    "refresh_token": "rt-new",
+                    "session_token": "st-new",
+                    "device_id": self.device_id,
+                }
+
+        class Flow:
+            def __init__(self, *args, **kwargs):
+                self.result = Result()
+                self._codex_access_token = access
+                self._codex_id_token = identity
+                self.session = type("Session", (), {"cookies": {"oai-did": "device-new"}})()
+
+            def run_protocol_login(self, *args, **kwargs):
+                return self.result
+
+        with mock.patch.object(engine, "AuthFlow", Flow):
+            refreshed = engine.relogin_account({
+                "email": "fresh@example.com",
+                "password": "pass",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
+            })
+        self.assertEqual(refreshed["access_token"], access)
+        self.assertEqual(refreshed["id_token"], identity)
+        self.assertEqual(refreshed["device_id"], "device-new")
+        self.assertEqual(refreshed["chatgpt_account_id"], "workspace-new")
 
 
 if __name__ == "__main__":

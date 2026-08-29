@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -29,6 +30,7 @@ from http_client import create_http_session
 from mail_providers.base import MailProvider
 
 BASE = "https://chatgpt.com"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 logger = logging.getLogger("relogin_engine")
 
 
@@ -82,6 +84,31 @@ def _profile(token: str) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _oidc_at_hash(access_token: str) -> str:
+    """OIDC ``at_hash`` for a Codex access token."""
+    digest = hashlib.sha256(_text(access_token).encode("utf-8")).digest()[:16]
+    return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+
+
+def validate_sub2_token_pair(access_token: str, id_token: str = "") -> None:
+    """拒绝 AT/ID 不属于同一 OAuth family 的凭证。"""
+    access = _text(access_token)
+    identity = _text(id_token)
+    if not access or not identity:
+        return
+    access_payload = decode_jwt_payload(access)
+    identity_payload = decode_jwt_payload(identity)
+    claimed_hash = _text(identity_payload.get("at_hash"))
+    if claimed_hash and claimed_hash != _oidc_at_hash(access):
+        raise ValueError("id_token 与 access_token 不匹配（at_hash 校验失败）")
+    access_client = _text(access_payload.get("client_id"))
+    audience = identity_payload.get("aud")
+    audiences = audience if isinstance(audience, list) else [audience]
+    audiences = [_text(value) for value in audiences if _text(value)]
+    if access_client and audiences and access_client not in audiences:
+        raise ValueError("id_token 与 access_token 不匹配（client_id/aud 校验失败）")
+
+
 def normalized_account(raw: dict) -> dict:
     """兼容 Sub2API / CPA / 旧字段，归一化为工具内部账号对象。"""
     raw = _object(raw)
@@ -92,20 +119,23 @@ def normalized_account(raw: dict) -> dict:
     access_token = _text(_field(sources, "access_token", "accessToken", "access-token", "token"))
     auth = _auth(access_token)
     profile = _profile(access_token)
-    email = _text(
-        _field(sources, "email", "mail", "username", "name") or profile.get("email")
-    ).lower()
+    # JWT 是服务端刚签发的事实来源；导入文件中的元数据可能来自旧一组
+    # OAuth 凭证，不能覆盖新 token 的身份信息。
+    email = _text(profile.get("email") or _field(sources, "email", "mail", "username", "name")).lower()
     account_id = _text(
-        _field(sources, "chatgpt_account_id", "chatgptAccountId", "workspace_id", "workspaceId")
-        or auth.get("chatgpt_account_id")
+        auth.get("chatgpt_account_id")
         or auth.get("account_id")
+        or _field(sources, "chatgpt_account_id", "chatgptAccountId", "workspace_id", "workspaceId")
         or _field(sources, "account_id", "accountId")
     )
     user_id = _text(
-        _field(sources, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
-        or auth.get("chatgpt_user_id")
+        auth.get("chatgpt_user_id")
         or auth.get("user_id")
+        or _field(sources, "chatgpt_user_id", "chatgptUserId", "user_id", "userId")
     )
+    client_id = _text(decode_jwt_payload(access_token).get("client_id"))
+    if not client_id:
+        client_id = _text(_field(sources, "client_id", "clientId"))
     return {
         "email": email,
         "password": _text(_field(sources, "password", "passwd")),
@@ -118,8 +148,9 @@ def normalized_account(raw: dict) -> dict:
         "session_token": _text(_field(sources, "session_token", "sessionToken")),
         "chatgpt_account_id": account_id,
         "chatgpt_user_id": user_id,
-        "client_id": _text(_field(sources, "client_id", "clientId")),
-        "plan_type": _text(_field(sources, "plan_type", "planType") or auth.get("chatgpt_plan_type") or "team"),
+        "client_id": client_id,
+        "device_id": _text(_field(sources, "device_id", "deviceId", "oai_device_id", "oaiDeviceId")),
+        "plan_type": _text(auth.get("chatgpt_plan_type") or _field(sources, "plan_type", "planType") or "team"),
         "organization_id": _text(_field(sources, "organization_id", "organizationId") or auth.get("organization_id")),
     }
 
@@ -136,7 +167,7 @@ def account_headers(account: dict) -> dict:
         "Origin": BASE,
         "Referer": f"{BASE}/",
         "User-Agent": "codex-cli",
-        "oai-device-id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"standalone-401-relogin:{account_id or email or 'personal'}")),
+        "oai-device-id": cred.get("device_id") or str(uuid.uuid5(uuid.NAMESPACE_DNS, f"standalone-401-relogin:{account_id or email or 'personal'}")),
     }
     if account_id:
         headers["chatgpt-account-id"] = account_id
@@ -281,8 +312,34 @@ def relogin_account(account: dict, *, proxy: str = "", login_timeout: int = 180,
             ) from exc
         raise
     data = result.to_dict()
+    # AuthFlow may have fetched a Web/NextAuth token immediately before the
+    # independent Codex OAuth exchange.  Prefer the explicitly tracked Codex
+    # family so a stale Web ID token can never be paired with the new AT.
+    codex_access = _text(getattr(flow, "_codex_access_token", ""))
+    codex_id = _text(getattr(flow, "_codex_id_token", ""))
+    if codex_access:
+        data["access_token"] = codex_access
+        data["id_token"] = codex_id
+        token_client_id = _text(decode_jwt_payload(codex_access).get("client_id"))
+        if token_client_id and token_client_id != CODEX_CLIENT_ID:
+            raise RuntimeError(f"重登录返回了非 Codex access_token（client_id={token_client_id}）")
+    elif data.get("access_token"):
+        token_client_id = _text(decode_jwt_payload(data["access_token"]).get("client_id"))
+        if token_client_id and token_client_id != CODEX_CLIENT_ID:
+            raise RuntimeError(f"重登录未取得 Codex access_token（client_id={token_client_id}）")
+    if not _text(data.get("id_token")):
+        # 不允许用旧导入的 ID token 补位；它很可能属于上一组 AT。
+        data["id_token"] = ""
+    data["device_id"] = _text(
+        data.get("device_id")
+        or getattr(getattr(flow, "result", None), "device_id", "")
+        or flow.session.cookies.get("oai-did", "")
+    )
     data.update({"email": email, "password": password, "totp_secret": totp_secret})
     refreshed = normalized_account({**cred, **data})
+    # 保证成功重登录后导出和后续额度查询复用本次 AuthFlow 的设备标识。
+    if not refreshed.get("device_id"):
+        refreshed["device_id"] = _text(data.get("device_id"))
     refreshed_workspace = refreshed.get("chatgpt_account_id") or workspace_id
     if workspace_id and refreshed_workspace != workspace_id:
         raise RuntimeError(f"重登后 workspace 不匹配: {refreshed_workspace} != {workspace_id}")
