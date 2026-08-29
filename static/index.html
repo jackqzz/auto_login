@@ -38,7 +38,9 @@
     .accordion-body { padding:0 16px 16px; }
     .accordion.collapsed .accordion-body { display:none; }
     .stat-card { margin-bottom:12px; padding:11px 16px; }
-    .stat-card .statbar { margin-top:0; gap:6px; }
+    .stat-card .account-card-header { flex-wrap:nowrap; gap:14px; }
+    .stat-card .account-card-header h2 { white-space:nowrap; }
+    .stat-card .statbar { flex:1; margin-top:0; gap:6px; }
     .account-card { margin-bottom:16px; }
     .account-card-header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
     .account-card-header h2 { margin:0; }
@@ -75,7 +77,7 @@
     .proxy-item { display:flex; gap:8px; align-items:center; border-bottom:1px solid #f0f1f3; padding:6px 0; }
     .proxy-item span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
     #toast { position:fixed; right:20px; bottom:20px; z-index:10; max-width:420px; padding:11px 14px; border-radius:7px; background:#111827; color:#fff; display:none; box-shadow:0 5px 20px #0003; }
-    @media (max-width:900px) { .wrap { padding:10px; } .grid { grid-template-columns:1fr; } header { padding:18px; } }
+    @media (max-width:900px) { .wrap { padding:10px; } .grid { grid-template-columns:1fr; } header { padding:18px; } .stat-card .account-card-header { flex-wrap:wrap; } .stat-card .statbar { flex-basis:100%; order:3; } }
   </style>
 </head>
 <body>
@@ -122,12 +124,12 @@
   <div class="card stat-card">
     <div class="account-card-header">
       <h2>账号情况</h2>
+      <div class="statbar" id="stats"></div>
       <div class="row">
         <span class="hint">当前账号库实时统计</span>
         <button id="openSettingsBtn">代理池与任务设置</button>
       </div>
     </div>
-    <div class="statbar" id="stats"></div>
   </div>
 
   <div class="card account-card">
