@@ -177,10 +177,24 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
             try:
                 if kind == "quota":
                     quota = engine.fetch_quota(account, proxy=proxy, timeout=settings["quota_timeout"])
+                    with _jobs_lock:
+                        workspace_marked = bool(workspace_id and workspace_id in _workspace_402)
+                    if workspace_marked:
+                        message = f"workspace {workspace_id} 已因其他账号 HTTP 402 停用"
+                        db.update_account(account_id, status="402", last_error=message, last_checked_at=time.time())
+                        _set_item(job_id, index, status="failed", error=message)
+                        return
                     db.update_account(account_id, status="active", quota=quota, last_error="", last_checked_at=time.time())
                     _set_item(job_id, index, status="success", quota=quota, error="")
                     return
                 refreshed = engine.relogin_account(account, proxy=proxy, login_timeout=settings["login_timeout"])
+                with _jobs_lock:
+                    workspace_marked = bool(workspace_id and workspace_id in _workspace_402)
+                if workspace_marked:
+                    message = f"workspace {workspace_id} 已因其他账号 HTTP 402 停用"
+                    db.update_account(account_id, status="402", last_error=message, last_checked_at=time.time())
+                    _set_item(job_id, index, status="failed", error=message)
+                    return
                 db.update_account(
                     account_id,
                     **{key: refreshed.get(key, "") for key in (
@@ -197,8 +211,12 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                 last_error = str(exc)
                 code = int(exc.status_code or 0)
                 if code == 402:
-                    _mark_workspace_402(job_id, workspace_id, last_error)
-                    logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                    if workspace_id:
+                        _mark_workspace_402(job_id, workspace_id, last_error)
+                        logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                    else:
+                        db.update_account(account_id, status="402", last_error=last_error, last_checked_at=time.time())
+                        _set_item(job_id, index, status="failed", error=last_error)
                 else:
                     status = str(code) if code == 403 else "deactivated"
                     db.update_account(account_id, status=status, last_error=last_error, last_checked_at=time.time())
@@ -215,8 +233,12 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                 if status_code in (402, 403):
                     last_error = f"账号停用/不可用 HTTP {status_code}: {str(exc)[:300]}"
                     if status_code == 402:
-                        _mark_workspace_402(job_id, workspace_id, last_error)
-                        logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                        if workspace_id:
+                            _mark_workspace_402(job_id, workspace_id, last_error)
+                            logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                        else:
+                            db.update_account(account_id, status="402", last_error=last_error, last_checked_at=time.time())
+                            _set_item(job_id, index, status="failed", error=last_error)
                     else:
                         db.update_account(account_id, status="403", last_error=last_error, last_checked_at=time.time())
                         _set_item(job_id, index, status="failed", error=last_error)
