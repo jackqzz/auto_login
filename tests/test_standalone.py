@@ -2,7 +2,6 @@ import base64
 import json
 import tempfile
 import unittest
-import uuid
 from unittest import mock
 from pathlib import Path
 
@@ -175,10 +174,7 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual(credentials["email"], "new@example.com")
         self.assertEqual(credentials["chatgpt_account_id"], "new-workspace")
         self.assertEqual(credentials["client_id"], engine.CODEX_CLIENT_ID)
-        self.assertEqual(
-            credentials["device_id"],
-            str(uuid.uuid5(uuid.NAMESPACE_DNS, "standalone-401-relogin:new-workspace")),
-        )
+        self.assertNotIn("device_id", credentials)
 
     def test_sub2_export_rejects_mismatched_id_token(self):
         access = jwt({"client_id": engine.CODEX_CLIENT_ID})

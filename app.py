@@ -456,9 +456,9 @@ def _sub2_account(account: dict) -> dict:
     email = str(profile.get("email") or account.get("email") or "").strip().lower()
     client_id = str(payload.get("client_id") or engine.CODEX_CLIENT_ID).strip()
     plan_type = str(auth.get("chatgpt_plan_type") or account.get("plan_type") or "team").strip() or "team"
-    device_id = str(account.get("device_id") or "").strip() or str(
-        uuid.uuid5(uuid.NAMESPACE_DNS, f"standalone-401-relogin:{account_id or email or 'personal'}")
-    )
+    # 只有 AuthFlow 实际取得的 device_id 才能随凭证导出；不能为旧账号凭空
+    # 生成一个新的值，否则会再次出现 device_id 与 token 会话不一致。
+    device_id = str(account.get("device_id") or "").strip()
     id_payload = engine.decode_jwt_payload(account.get("id_token", ""))
     id_auth = id_payload.get("https://api.openai.com/auth") or {}
     organization_id = str(
@@ -517,8 +517,7 @@ def _sub2_account(account: dict) -> dict:
         "chatgpt_plan_type": plan_type,
         "organization_id": organization_id,
         "workspace_id": account_id,
-        "device_id": device_id,
-        "oai_device_id": device_id,
+        **({"device_id": device_id, "oai_device_id": device_id} if device_id else {}),
         "expired": expires,
         "expires_at": expires,
         "expires_in": max(0, exp - int(time.time())) if exp else 0,
@@ -540,7 +539,6 @@ def _sub2_account(account: dict) -> dict:
         "plan_type": plan_type,
         "concurrency": 10,
         "credentials": credentials,
-        "device_id": device_id,
         "group_ids": [4],
         "expires_at": exp,
         "auto_pause_on_expired": True,
