@@ -118,6 +118,21 @@ class StandaloneTests(unittest.TestCase):
         with app._jobs_lock:
             app._jobs.pop("test-job", None)
 
+    def test_cpa_export_uses_current_tokens(self):
+        row = db.upsert_account({
+            "email": "cpa@example.com",
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "id_token": "id-token",
+            "chatgpt_account_id": "acct-cpa",
+        })
+        response = app.export_cpa(str(row["id"]))
+        payload = json.loads(response.body)
+        self.assertEqual(payload["type"], "codex")
+        self.assertEqual(payload["email"], "cpa@example.com")
+        self.assertEqual(payload["account_id"], "acct-cpa")
+        self.assertEqual(payload["refresh_token"], "refresh-token")
+
 
 if __name__ == "__main__":
     unittest.main()

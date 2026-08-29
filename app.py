@@ -7,12 +7,15 @@ loaded for the actual OpenAI protocol login.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
+import re
 import sys
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
@@ -474,6 +477,32 @@ def _sub2_account(account: dict) -> dict:
     }
 
 
+def _cpa_token(account: dict) -> dict:
+    """生成 CPA auth-file 格式（与 CPA 面板直接导入兼容）。"""
+    token = str(account.get("access_token") or "").strip()
+    payload = engine.decode_jwt_payload(token)
+    auth = payload.get("https://api.openai.com/auth") or {}
+    account_id = str(
+        account.get("chatgpt_account_id")
+        or auth.get("chatgpt_account_id")
+        or auth.get("account_id")
+        or ""
+    ).strip()
+    exp = int(payload.get("exp") or 0)
+    expired = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)) if exp else ""
+    return {
+        "access_token": token,
+        "account_id": account_id,
+        "disabled": False,
+        "email": account.get("email", ""),
+        "expired": expired,
+        "id_token": account.get("id_token", ""),
+        "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "refresh_token": account.get("refresh_token", ""),
+        "type": "codex",
+    }
+
+
 @app.get("/api/export/sub2api")
 def export_sub2api(account_ids: str = "") -> Response:
     ids = _clean_ids([value for value in account_ids.split(",") if value.strip()])
@@ -491,6 +520,43 @@ def export_sub2api(account_ids: str = "") -> Response:
         content=body,
         media_type="application/json",
         headers={"Content-Disposition": "attachment; filename=sub2api-accounts.json"},
+    )
+
+
+@app.get("/api/export/cpa")
+def export_cpa(account_ids: str = "") -> Response:
+    """导出 CPA auth-file：单账号 JSON，多账号 ZIP。"""
+    ids = _clean_ids([value for value in account_ids.split(",") if value.strip()])
+    rows = [db.get_account(account_id) for account_id in _account_ids_or_all(ids)]
+    rows = [row for row in rows if row]
+    entries = []
+    used_names: set[str] = set()
+    for index, row in enumerate(rows, 1):
+        data = _cpa_token(row)
+        base = re.sub(r"[^A-Za-z0-9._@+-]+", "_", str(data.get("email") or f"account-{index}")).strip("._") or f"account-{index}"
+        name = f"{base}.json"
+        suffix = 2
+        while name in used_names:
+            name = f"{base}-{suffix}.json"
+            suffix += 1
+        used_names.add(name)
+        entries.append((name, data))
+    if len(entries) <= 1:
+        data = entries[0][1] if entries else {}
+        body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": "attachment; filename=cpa-account.json"},
+        )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries:
+            archive.writestr(name, json.dumps(data, ensure_ascii=False, indent=2))
+    return Response(
+        content=output.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=cpa-accounts.zip"},
     )
 
 

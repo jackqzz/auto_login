@@ -118,6 +118,7 @@
         <div class="toolbar">
           <button class="primary" id="checkBtn">检查额度 / 401</button>
           <button class="success" id="reloginBtn">密码 + 2FA 重登录</button>
+          <button id="exportCpaBtn">导出 CPA</button>
           <button id="exportSub2Btn">导出 Sub2API</button>
           <button id="exportPwdBtn">导出密码 + 2FA</button>
           <button id="selectAllBtn">全选 / 取消全选</button>
@@ -180,7 +181,7 @@
   $('clearAccountsBtn').onclick = async () => { if (!confirm('确定清空独立账号库？')) return; await api('/api/accounts/clear', { method:'POST' }); state.selected.clear(); await loadAll(); toast('账号库已清空') }
   $('clearProxyBtn').onclick = async () => { if (!confirm('确定清空独立代理池？')) return; await api('/api/proxies/clear', { method:'POST' }); await loadAll(); toast('代理池已清空') }
   $('saveSettingsBtn').onclick = async () => { try { await api('/api/settings', { method:'POST', body:JSON.stringify({ concurrency:Number($('concurrency').value), quota_timeout:Number($('quotaTimeout').value), login_timeout:Number($('loginTimeout').value), retry_count:Number($('retryCount').value) }) }); toast('任务设置已保存') } catch (error) { toast(error.message, true) } }
-  $('checkBtn').onclick = () => startJob('quota'); $('reloginBtn').onclick = () => startJob('relogin'); $('exportSub2Btn').onclick = () => download('/api/export/sub2api'); $('exportPwdBtn').onclick = () => download('/api/export/password-2fa'); $('refreshBtn').onclick = () => loadAll().catch((error) => toast(error.message, true));
+  $('checkBtn').onclick = () => startJob('quota'); $('reloginBtn').onclick = () => startJob('relogin'); $('exportCpaBtn').onclick = () => download('/api/export/cpa'); $('exportSub2Btn').onclick = () => download('/api/export/sub2api'); $('exportPwdBtn').onclick = () => download('/api/export/password-2fa'); $('refreshBtn').onclick = () => loadAll().catch((error) => toast(error.message, true));
   $('selectAllBtn').onclick = () => { if (selectedIds().length === state.accounts.length) state.selected.clear(); else state.accounts.forEach((row) => state.selected.add(row.id)); render() }
   $('checkAll').onchange = (event) => { if (event.target.checked) state.accounts.forEach((row) => state.selected.add(row.id)); else state.selected.clear(); render() }
   $('accountRows').addEventListener('change', (event) => { const id = Number(event.target.dataset.select); if (!id) return; if (event.target.checked) state.selected.add(id); else state.selected.delete(id); render() })
