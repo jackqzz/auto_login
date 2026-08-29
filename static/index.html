@@ -30,6 +30,11 @@
     button.danger { color:var(--bad); border-color:#fecaca; }
     button:disabled { opacity:.55; cursor:not-allowed; }
     .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+    .export-picker { display:inline-flex; align-items:stretch; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#fff; }
+    .export-picker select { width:auto; min-width:175px; border:0; border-right:1px solid var(--line); border-radius:0; padding:7px 30px 7px 10px; outline:none; }
+    .export-picker button { border:0; border-radius:0; min-width:74px; background:#fff; }
+    .export-picker button.primary { background:var(--brand); color:#fff; }
+    .export-picker:focus-within { border-color:var(--brand); box-shadow:0 0 0 2px #2563eb1a; }
     .statbar { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 0; }
     .stat { border:1px solid var(--line); border-radius:7px; padding:6px 10px; background:#fafafa; }
     .stat b { margin-left:4px; }
@@ -118,9 +123,14 @@
         <div class="toolbar">
           <button class="primary" id="checkBtn">检查额度 / 401</button>
           <button class="success" id="reloginBtn">密码 + 2FA 重登录</button>
-          <button id="exportCpaBtn">导出 CPA</button>
-          <button id="exportSub2Btn">导出 Sub2API</button>
-          <button id="exportPwdBtn">导出密码 + 2FA</button>
+          <div class="export-picker">
+            <select id="exportKind" aria-label="导出格式">
+              <option value="cpa">CPA（单个 JSON / 批量 ZIP）</option>
+              <option value="sub2api">Sub2API JSON</option>
+              <option value="password-2fa">邮箱----密码----2FA</option>
+            </select>
+            <button class="primary" id="exportBtn">导出</button>
+          </div>
           <button id="selectAllBtn">全选 / 取消全选</button>
           <button id="refreshBtn">刷新</button>
         </div>
@@ -181,7 +191,7 @@
   $('clearAccountsBtn').onclick = async () => { if (!confirm('确定清空独立账号库？')) return; await api('/api/accounts/clear', { method:'POST' }); state.selected.clear(); await loadAll(); toast('账号库已清空') }
   $('clearProxyBtn').onclick = async () => { if (!confirm('确定清空独立代理池？')) return; await api('/api/proxies/clear', { method:'POST' }); await loadAll(); toast('代理池已清空') }
   $('saveSettingsBtn').onclick = async () => { try { await api('/api/settings', { method:'POST', body:JSON.stringify({ concurrency:Number($('concurrency').value), quota_timeout:Number($('quotaTimeout').value), login_timeout:Number($('loginTimeout').value), retry_count:Number($('retryCount').value) }) }); toast('任务设置已保存') } catch (error) { toast(error.message, true) } }
-  $('checkBtn').onclick = () => startJob('quota'); $('reloginBtn').onclick = () => startJob('relogin'); $('exportCpaBtn').onclick = () => download('/api/export/cpa'); $('exportSub2Btn').onclick = () => download('/api/export/sub2api'); $('exportPwdBtn').onclick = () => download('/api/export/password-2fa'); $('refreshBtn').onclick = () => loadAll().catch((error) => toast(error.message, true));
+  $('checkBtn').onclick = () => startJob('quota'); $('reloginBtn').onclick = () => startJob('relogin'); $('exportBtn').onclick = () => { const format = $('exportKind').value; const paths = { cpa:'/api/export/cpa', sub2api:'/api/export/sub2api', 'password-2fa':'/api/export/password-2fa' }; download(paths[format] || paths.cpa) }; $('refreshBtn').onclick = () => loadAll().catch((error) => toast(error.message, true));
   $('selectAllBtn').onclick = () => { if (selectedIds().length === state.accounts.length) state.selected.clear(); else state.accounts.forEach((row) => state.selected.add(row.id)); render() }
   $('checkAll').onchange = (event) => { if (event.target.checked) state.accounts.forEach((row) => state.selected.add(row.id)); else state.selected.clear(); render() }
   $('accountRows').addEventListener('change', (event) => { const id = Number(event.target.dataset.select); if (!id) return; if (event.target.checked) state.selected.add(id); else state.selected.delete(id); render() })
