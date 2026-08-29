@@ -54,6 +54,12 @@
     .drawer-header h2 { margin:0; }
     .drawer-section { border-bottom:1px solid #eef0f3; padding-bottom:17px; margin-bottom:17px; }
     .drawer-section:last-child { border-bottom:0; margin-bottom:0; }
+    .drawer-section label { display:block; margin-bottom:8px; }
+    .drawer-section .check-row { display:flex; align-items:center; gap:8px; margin:8px 0; }
+    .drawer-section .check-row input { width:auto; }
+    .inspection-status, .push-status { margin-top:10px; padding:9px; border-radius:6px; background:#f8fafc; color:var(--muted); font-size:12px; }
+    .push-target { border:1px solid var(--line); border-radius:7px; padding:10px; margin:9px 0; }
+    .push-target h4 { margin:0 0 8px; font-size:13px; }
     .export-picker { display:inline-flex; align-items:stretch; border:1px solid var(--line); border-radius:6px; overflow:hidden; background:#fff; }
     .export-picker select { width:auto; min-width:175px; border:0; border-right:1px solid var(--line); border-radius:0; padding:7px 30px 7px 10px; outline:none; }
     .export-picker button { border:0; border-radius:0; min-width:74px; background:#fff; }
@@ -181,11 +187,48 @@
       </div>
       <button class="primary" id="saveSettingsBtn" style="margin-top:10px">保存任务设置</button>
     </div>
+    <div class="drawer-section">
+      <h3>自动巡检 401</h3>
+      <div class="row">
+        <label class="grow">巡检批次<input id="inspectionBatch" type="number" min="1" max="500" /></label>
+        <label class="grow">巡检周期（分钟）<input id="inspectionInterval" type="number" min="1" max="1440" /></label>
+      </div>
+      <label class="check-row"><input id="inspectionAutoRelogin" type="checkbox" />发现 401 后立即密码 + 2FA 重登录</label>
+      <div class="toolbar"><button class="primary" id="startInspectionBtn">启动自动巡检</button><button id="stopInspectionBtn">停止巡检</button></div>
+      <div class="hint">每轮优先检查最久没有检查的账号；账号全部遍历后继续循环。402/403 停用账号自动跳过。</div>
+      <div class="inspection-status" id="inspectionStatus">巡检未启动</div>
+    </div>
+    <div class="drawer-section">
+      <h3>自动推送号池</h3>
+      <div class="hint" style="line-height:1.6">配置只保存在当前浏览器，账号凭证由浏览器直接发送到 CPA/Sub2API，不会上传到本工具后端。开启后，自动巡检或手动重登录成功的账号会自动排队推送。</div>
+      <label class="check-row"><input id="poolPushAuto" type="checkbox" />开启自动推送</label>
+      <div class="push-target">
+        <h4><label class="check-row"><input id="cpaEnabled" type="checkbox" /> CPA</label></h4>
+        <label>地址<input id="cpaUrl" placeholder="https://cpa.example.com" /></label>
+        <label>管理密钥<input id="cpaKey" type="password" placeholder="Authorization / X-Management-Key" /></label>
+        <label>超时（秒）<input id="cpaTimeout" type="number" min="5" max="300" value="30" /></label>
+      </div>
+      <div class="push-target">
+        <h4><label class="check-row"><input id="sub2Enabled" type="checkbox" /> Sub2API</label></h4>
+        <label>地址<input id="sub2Url" placeholder="https://sub2api.example.com" /></label>
+        <label>API Key<input id="sub2Key" type="password" placeholder="x-api-key" /></label>
+        <label>分组 IDs<input id="sub2GroupIds" placeholder="2" value="2" /></label>
+        <label>超时（秒）<input id="sub2Timeout" type="number" min="5" max="300" value="30" /></label>
+      </div>
+      <button class="primary" id="pushSelectedBtn">推送选中账号</button>
+      <div class="push-status" id="pushStatus">未配置推送目标</div>
+    </div>
   </div>
 </aside>
 <div id="toast"></div>
 <script>
-  const state = { accounts: [], proxies: [], selected: new Set(), job: null, poller: null }
+  const PUSH_CONFIG_KEY = 'standalone_401_pool_push_v1'
+  const state = {
+    accounts: [], proxies: [], selected: new Set(), job: null, poller: null,
+    inspection: null, inspectionPoller: null, accountsInitialized: false,
+    seenRevived: new Set(), pushQueue: Promise.resolve(), pushStats: { queued: 0, running: 0, success: 0, failed: 0, last: '' },
+    pushedKeys: new Set(), poolPush: { autoEnabled: false, cpa: { enabled: false, url: '', key: '', timeout: 30 }, sub2api: { enabled: false, url: '', key: '', groupIds: '2', timeout: 30 } },
+  }
   const $ = (id) => document.getElementById(id)
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))
   function toast(message, error = false) { const node = $('toast'); node.textContent = message; node.style.display = 'block'; node.style.background = error ? '#991b1b' : '#111827'; clearTimeout(toast.timer); toast.timer = setTimeout(() => { node.style.display = 'none' }, 4200) }
@@ -197,6 +240,55 @@
   function selectedIds() { return [...state.selected].filter((id) => state.accounts.some((row) => row.id === id)) }
   function statusTag(status) { const map = { imported:['待检查',''], active:['存活','ok'], revived:['已复活','ok'], '401':['401','bad'], '402':['402 · Workspace停用','bad'], '403':['403 · 已停用','bad'], deactivated:['已停用','bad'], error:['错误','bad'] }; const value = map[status] || [status || '未知','warn']; return `<span class="tag ${value[1]}">${esc(value[0])}</span>` }
   function formatQuota(quota) { if (!quota || typeof quota !== 'object' || !Object.keys(quota).length) return '<span class="hint">—</span>'; const primary = quota.primary || {}; const balance = quota.credits_balance == null ? '' : `余额 ${quota.credits_balance}`; const used = primary.used_percent == null ? '' : `主窗口 ${primary.used_percent}%`; return esc([balance, used].filter(Boolean).join(' · ') || '已返回') }
+  function defaultPoolPush() { return { autoEnabled: false, cpa: { enabled: false, url: '', key: '', timeout: 30 }, sub2api: { enabled: false, url: '', key: '', groupIds: '2', timeout: 30 } } }
+  function loadPoolPushConfig() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(PUSH_CONFIG_KEY) || '{}')
+      const defaults = defaultPoolPush()
+      state.poolPush = { ...defaults, ...saved, cpa: { ...defaults.cpa, ...(saved.cpa || {}) }, sub2api: { ...defaults.sub2api, ...(saved.sub2api || {}) } }
+    } catch (_) { state.poolPush = defaultPoolPush() }
+    $('poolPushAuto').checked = !!state.poolPush.autoEnabled
+    for (const [prefix, config] of [['cpa', state.poolPush.cpa], ['sub2', state.poolPush.sub2api]]) {
+      $(`${prefix}Enabled`).checked = !!config.enabled
+      $(`${prefix}Url`).value = config.url || ''
+      $(`${prefix}Key`).value = config.key || ''
+      $(`${prefix}Timeout`).value = config.timeout || 30
+      if (prefix === 'sub2') $('sub2GroupIds').value = config.groupIds || '2'
+    }
+    renderPushStatus()
+  }
+  function savePoolPushConfig() {
+    state.poolPush.autoEnabled = $('poolPushAuto').checked
+    state.poolPush.cpa = { enabled: $('cpaEnabled').checked, url: $('cpaUrl').value.trim(), key: $('cpaKey').value.trim(), timeout: Number($('cpaTimeout').value) || 30 }
+    state.poolPush.sub2api = { enabled: $('sub2Enabled').checked, url: $('sub2Url').value.trim(), key: $('sub2Key').value.trim(), groupIds: $('sub2GroupIds').value.trim() || '2', timeout: Number($('sub2Timeout').value) || 30 }
+    localStorage.setItem(PUSH_CONFIG_KEY, JSON.stringify(state.poolPush))
+    renderPushStatus()
+    maybeAutoPush(state.accounts)
+  }
+  function configuredPoolTargets() { return [['cpa', state.poolPush.cpa], ['sub2api', state.poolPush.sub2api]].filter(([, config]) => config.enabled && config.url && config.key) }
+  function renderPushStatus() {
+    const configured = configuredPoolTargets().map(([target]) => target === 'cpa' ? 'CPA' : 'Sub2API')
+    const stats = state.pushStats
+    $('pushStatus').innerHTML = `${state.poolPush.autoEnabled ? '<span class="tag ok">自动推送已开启</span>' : '<span class="tag">自动推送未开启</span>'} <span class="hint">目标：${esc(configured.join(' + ') || '未配置')}</span><br><span class="hint">队列 ${stats.queued} · 推送中 ${stats.running} · 成功 ${stats.success} · 失败 ${stats.failed}${stats.last ? ` · ${esc(stats.last)}` : ''}</span>`
+  }
+  function decodeJwt(token) { try { const part = String(token || '').split('.')[1]; if (!part) return {}; const normalized = part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='); return JSON.parse(atob(normalized)) } catch (_) { return {} } }
+  function accountPayload(item) {
+    const token = String(item.access_token || '').trim(); const payload = decodeJwt(token); const auth = payload['https://api.openai.com/auth'] || {}; const profile = payload['https://api.openai.com/profile'] || {}
+    const email = String(profile.email || item.email || '').trim().toLowerCase(); const accountId = String(auth.chatgpt_account_id || auth.account_id || item.chatgpt_account_id || '').trim(); const userId = String(auth.chatgpt_user_id || auth.user_id || item.chatgpt_user_id || payload.sub || '').trim(); const plan = String(auth.chatgpt_plan_type || item.plan_type || 'team').trim() || 'team'; const exp = Number(payload.exp || 0); const expired = exp ? new Date(exp * 1000).toISOString() : ''
+    const clientId = String(payload.client_id || item.client_id || '').trim(); const exportedAt = new Date().toISOString(); const extra = { email, source: 'standalone_401_relogin', privacy_mode: 'training_off', original_format: 'codex-account', openai_oauth_responses_websockets_v2_mode: 'off', openai_oauth_responses_websockets_v2_enabled: false }; const accountUserId = userId && accountId ? `${userId}__${accountId}` : ''
+    const credentials = { name: profile.name || email, type: 'codex', extra, email, password: item.password || '', totp_secret: item.totp_secret || '', access_token: token, refresh_token: item.refresh_token || '', id_token: item.id_token || '', session_token: item.session_token || '', client_id: clientId, account_id: accountId, chatgpt_account_id: accountId, chatgpt_user_id: userId, plan_type: plan, chatgpt_plan_type: plan, workspace_id: accountId, organization_id: item.organization_id || auth.organization_id || auth.poid || '', expired, expires_at: expired, expires_in: Math.max(0, exp - Math.floor(Date.now() / 1000)), disabled: false, email_source: 'oauth_access_token_claim', last_refresh: exportedAt, outlook_email: email, identity_source: 'oauth_access_token_claim', account_id_source: 'oauth_access_token_claim', chatgpt_account_user_id: accountUserId, live_identity: { plan, email, user_id: userId, client_id: clientId, account_id: accountId, plan_source: 'oauth_access_token_claim', verified_at: exportedAt, email_source: 'oauth_access_token_claim', official_plan: plan, client_trusted: false, email_verified: true, user_id_source: 'oauth_access_token_claim', account_user_id: accountUserId, identity_source: 'oauth_access_token_claim', account_id_source: 'oauth_access_token_claim', account_user_id_source: 'oauth_access_token_claim' } }
+    if (item.device_id) { credentials.device_id = item.device_id; credentials.oai_device_id = item.device_id }
+    return { name: email, type: 'oauth', extra, platform: 'openai', priority: 1, plan_type: plan, concurrency: 10, credentials, group_ids: [4], expires_at: exp, auto_pause_on_expired: true }
+  }
+  function cpaPayload(item) { const token = String(item.access_token || '').trim(); const payload = decodeJwt(token); const auth = payload['https://api.openai.com/auth'] || {}; return { access_token: token, account_id: auth.chatgpt_account_id || auth.account_id || item.chatgpt_account_id || '', disabled: false, email: item.email || '', expired: payload.exp ? new Date(Number(payload.exp) * 1000).toISOString() : '', id_token: item.id_token || '', last_refresh: new Date().toISOString(), refresh_token: item.refresh_token || '', type: 'codex' } }
+  function targetUrl(base, path) { const value = String(base || '').trim(); const url = new URL(value); if (!['http:', 'https:'].includes(url.protocol)) throw new Error('号池地址只支持 HTTP/HTTPS'); if (location.protocol === 'https:' && url.protocol === 'http:') throw new Error('HTTPS 页面不能直连 HTTP 号池'); url.search = ''; url.hash = ''; return `${url.toString().replace(/\/+$/, '')}${path}` }
+  async function poolFetch(url, options, timeoutSeconds) { const controller = new AbortController(); const timeout = Math.max(5, Math.min(300, Number(timeoutSeconds) || 30)); const timer = setTimeout(() => controller.abort(), timeout * 1000); try { const response = await fetch(url, { ...options, mode: 'cors', credentials: 'omit', signal: controller.signal }); if (!response.ok) { let body = ''; try { body = await response.text() } catch (_) {} throw new Error(`HTTP ${response.status}${body ? `: ${body.slice(0, 180)}` : ''}`) } return response } catch (error) { if (error.name === 'AbortError') throw new Error(`号池请求超时（${timeout} 秒）`); if (error instanceof TypeError) throw new Error('浏览器无法直连号池，请检查 CORS/HTTPS 配置'); throw error } finally { clearTimeout(timer) } }
+  async function pushAccountTarget(item, target, config) { if (!item.access_token) throw new Error('账号缺少 access_token'); if (target === 'cpa') { const token = cpaPayload(item); const form = new FormData(); form.append('file', new Blob([JSON.stringify(token, null, 2)], { type: 'application/json' }), `${String(token.email || 'unknown').replace(/[\\/:*?"<>|]/g, '_')}.json`); await poolFetch(targetUrl(config.url, '/v0/management/auth-files'), { method: 'POST', headers: { Authorization: `Bearer ${config.key}`, 'X-Management-Key': config.key, Accept: 'application/json, text/plain, */*' }, body: form }, config.timeout); return `${token.email || '账号'} → CPA` }
+    const payload = accountPayload(item); await poolFetch(targetUrl(config.url, '/api/v1/admin/accounts'), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*', 'x-api-key': config.key }, body: JSON.stringify(payload) }, config.timeout); return `${payload.name || '账号'} → Sub2API` }
+  function pushKey(item, target) { return `${item.id}:${item.last_relogin_at || item.updated_at || item.status}:${target}` }
+  function queuePush(item, targets, force = false) { const configured = targets || configuredPoolTargets(); for (const [target, config] of configured) { const key = pushKey(item, target); if (!force && state.pushedKeys.has(key)) continue; state.pushedKeys.add(key); state.pushStats.queued++; state.pushQueue = state.pushQueue.then(async () => { state.pushStats.queued = Math.max(0, state.pushStats.queued - 1); state.pushStats.running++; renderPushStatus(); try { const message = await pushAccountTarget(item, target, config); state.pushStats.success++; state.pushStats.last = message } catch (error) { state.pushStats.failed++; state.pushStats.last = `${item.email || '账号'}：${error.message}` } finally { state.pushStats.running = Math.max(0, state.pushStats.running - 1); renderPushStatus() } }); } renderPushStatus() }
+  function maybeAutoPush(rows, initial = false) { for (const item of rows) { if (item.status !== 'revived' || !item.last_relogin_at) continue; const key = `${item.id}:${item.last_relogin_at}`; if (initial) { state.seenRevived.add(key); continue } if (state.seenRevived.has(key)) continue; if (state.poolPush.autoEnabled && configuredPoolTargets().length) { state.seenRevived.add(key); queuePush(item) } } }
+  function renderInspection() { const item = state.inspection; if (!item) { $('inspectionStatus').textContent = '巡检未启动'; return } const seconds = Number(item.next_run_in_seconds || 0); const countdown = seconds ? `${Math.floor(seconds / 60)}分${seconds % 60}秒后` : '即将执行'; $('inspectionStatus').innerHTML = item.running ? `<span class="tag ok">运行中</span> 第 ${item.round || 0} 轮 · 最近批次 ${item.last_batch || 0} 个 · ${countdown}${item.last_error ? `<br><span style="color:var(--bad)">${esc(item.last_error)}</span>` : ''}` : `<span class="tag">未启动</span>${item.last_error ? ` <span class="hint">${esc(item.last_error)}</span>` : ''}` }
   function render() {
     const counts = state.accounts.reduce((out, row) => { out.total++; out[row.status] = (out[row.status] || 0) + 1; return out }, { total: 0 })
     $('stats').innerHTML = [['总数', counts.total], ['存活', (counts.active || 0) + (counts.revived || 0)], ['401', counts['401'] || 0], ['402', counts['402'] || 0], ['403', counts['403'] || 0], ['停用', counts.deactivated || 0], ['已选', selectedIds().length]].map(([name, value]) => `<div class="stat">${name}<b>${value}</b></div>`).join('')
@@ -215,12 +307,17 @@
     renderProxies()
   }
   function renderProxies() { $('proxyList').innerHTML = state.proxies.map((row) => `<div class="proxy-item"><span class="mono" title="${esc(row.proxy)}">${esc(row.proxy)}</span><small class="hint">租用 ${row.lease_count}</small><button class="danger" data-proxy-delete="${row.id}">删除</button></div>`).join('') || '<div class="hint">代理池为空，将使用直连</div>' }
-  async function loadAll() { const [accounts, proxies, settings] = await Promise.all([api('/api/accounts'), api('/api/proxies'), api('/api/settings')]); state.accounts = accounts.items || []; state.proxies = proxies.items || []; $('concurrency').value = settings.settings.concurrency; $('quotaTimeout').value = settings.settings.quota_timeout; $('loginTimeout').value = settings.settings.login_timeout; $('retryCount').value = settings.settings.retry_count; state.selected = new Set([...state.selected].filter((id) => state.accounts.some((row) => row.id === id))); render() }
+  async function loadAccountsOnly() { const response = await api('/api/accounts'); const initial = !state.accountsInitialized; state.accounts = response.items || []; state.selected = new Set([...state.selected].filter((id) => state.accounts.some((row) => row.id === id))); maybeAutoPush(state.accounts, initial); state.accountsInitialized = true; render() }
+  async function loadInspection() { const response = await api('/api/inspection'); state.inspection = response.inspection || null; renderInspection() }
+  async function loadAll() { const [accountResponse, proxies, settings, inspection] = await Promise.all([api('/api/accounts'), api('/api/proxies'), api('/api/settings'), api('/api/inspection')]); const initial = !state.accountsInitialized; state.accounts = accountResponse.items || []; state.proxies = proxies.items || []; state.inspection = inspection.inspection || null; $('concurrency').value = settings.settings.concurrency; $('quotaTimeout').value = settings.settings.quota_timeout; $('loginTimeout').value = settings.settings.login_timeout; $('retryCount').value = settings.settings.retry_count; $('inspectionBatch').value = settings.settings.inspection_batch_size; $('inspectionInterval').value = settings.settings.inspection_interval_minutes; $('inspectionAutoRelogin').checked = settings.settings.inspection_auto_relogin !== false; state.selected = new Set([...state.selected].filter((id) => state.accounts.some((row) => row.id === id))); maybeAutoPush(state.accounts, initial); state.accountsInitialized = true; render(); renderInspection() }
   async function importAccounts() { const text = $('accountText').value.trim(); if (!text) return toast('请粘贴内容或选择文件', true); try { const result = await api('/api/import', { method:'POST', body: JSON.stringify({ text, kind: $('importKind').value }) }); $('accountText').value = ''; toast(`已导入 ${result.imported} 个账号`); await loadAll() } catch (error) { toast(error.message, true) } }
   async function startJob(kind) { const ids = selectedIds(); if (!ids.length) return toast('请先选择账号', true); try { const result = await api(kind === 'quota' ? '/api/check' : '/api/relogin', { method:'POST', body: JSON.stringify({ account_ids: ids }) }); state.job = result.job; renderJob(); pollJob() } catch (error) { toast(error.message, true) } }
   function renderJob() { const job = state.job; if (!job) { $('jobBox').innerHTML = ''; return }; const percent = job.total ? Math.floor(job.done * 100 / job.total) : 0; $('jobBox').innerHTML = `<div class="job"><div><b>${job.kind === 'quota' ? '额度查询' : '密码 + 2FA 重登录'}</b> · ${job.status}</div><div class="progress"><div style="width:${percent}%"></div></div><div class="hint">${job.done} / ${job.total} · 成功 ${job.success} · 失败 ${job.failed} · 并发 ${job.concurrency}</div></div>` }
   async function pollJob() { if (!state.job || state.poller) return; state.poller = setInterval(async () => { try { const result = await api(`/api/jobs/${state.job.id}`); state.job = result.job; renderJob(); if (['done','done_with_errors'].includes(state.job.status)) { clearInterval(state.poller); state.poller = null; await loadAll(); toast(state.job.status === 'done' ? '任务完成' : '任务完成，但有失败账号') } } catch (error) { clearInterval(state.poller); state.poller = null; toast(error.message, true) } }, 800) }
   function download(path) { const ids = selectedIds(); const suffix = ids.length ? `?account_ids=${encodeURIComponent(ids.join(','))}` : ''; const link = document.createElement('a'); link.href = path + suffix; link.download = ''; document.body.appendChild(link); link.click(); link.remove() }
+  async function startInspection() { try { const response = await api('/api/inspection/start', { method:'POST', body:JSON.stringify({ batch_size:Number($('inspectionBatch').value) || 8, interval_minutes:Number($('inspectionInterval').value) || 5, auto_relogin:$('inspectionAutoRelogin').checked }) }); state.inspection = response.inspection; renderInspection(); toast('自动401巡检已启动') } catch (error) { toast(error.message, true) } }
+  async function stopInspection() { try { const response = await api('/api/inspection/stop', { method:'POST' }); state.inspection = response.inspection; renderInspection(); toast('自动401巡检已停止') } catch (error) { toast(error.message, true) } }
+  function pushSelected() { const targets = configuredPoolTargets(); const rows = state.accounts.filter((row) => state.selected.has(row.id)); if (!rows.length) return toast('请先选择账号', true); if (!targets.length) return toast('请先配置并启用 CPA 或 Sub2API', true); for (const row of rows) queuePush(row, targets, true); toast(`已将 ${rows.length} 个账号加入号池推送队列`) }
 
   $('importToggle').onclick = () => { const card = $('importCard'); const collapsed = card.classList.toggle('collapsed'); $('importToggle').setAttribute('aria-expanded', String(!collapsed)) }
   const drawer = $('settingsDrawer')
@@ -228,6 +325,10 @@
   $('openSettingsBtn').onclick = () => { drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false') }
   $('closeSettingsBtn').onclick = closeSettings
   $('drawerMask').onclick = closeSettings
+  $('startInspectionBtn').onclick = startInspection
+  $('stopInspectionBtn').onclick = stopInspection
+  $('pushSelectedBtn').onclick = pushSelected
+  for (const id of ['poolPushAuto', 'cpaEnabled', 'cpaUrl', 'cpaKey', 'cpaTimeout', 'sub2Enabled', 'sub2Url', 'sub2Key', 'sub2GroupIds', 'sub2Timeout']) $(id).addEventListener('change', savePoolPushConfig)
 
   $('accountFile').addEventListener('change', async (event) => { const file = event.target.files?.[0]; if (file) $('accountText').value = await file.text() })
   $('importBtn').onclick = importAccounts
@@ -241,7 +342,9 @@
   $('accountRows').addEventListener('change', (event) => { const id = Number(event.target.dataset.select); if (!id) return; if (event.target.checked) state.selected.add(id); else state.selected.delete(id); render() })
   $('accountRows').addEventListener('click', async (event) => { const id = Number(event.target.dataset.delete); if (!id || !confirm('确定删除这个账号？')) return; try { await api(`/api/accounts/${id}`, { method:'DELETE' }); state.selected.delete(id); await loadAll() } catch (error) { toast(error.message, true) } })
   $('proxyList').addEventListener('click', async (event) => { const id = Number(event.target.dataset.proxyDelete); if (!id) return; try { await api(`/api/proxies/${id}`, { method:'DELETE' }); await loadAll() } catch (error) { toast(error.message, true) } })
+  loadPoolPushConfig()
   loadAll().catch((error) => toast(`服务连接失败：${error.message}`, true))
+  state.inspectionPoller = setInterval(async () => { try { await loadInspection(); if (state.inspection?.running) await loadAccountsOnly() } catch (_) {} }, 2000)
 </script>
 </body>
 </html>

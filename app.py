@@ -52,6 +52,18 @@ _jobs: dict[str, dict] = {}
 _jobs_lock = threading.RLock()
 _job_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="standalone-401-job")
 _workspace_402: set[str] = set()
+_inspection_lock = threading.RLock()
+_inspection_stop: threading.Event | None = None
+_inspection_thread: threading.Thread | None = None
+_inspection_state: dict[str, Any] = {
+    "running": False,
+    "round": 0,
+    "last_batch": 0,
+    "next_run_at": 0.0,
+    "current_job_id": "",
+    "last_job_id": "",
+    "last_error": "",
+}
 
 
 def _clean_ids(values: Optional[list[Any]]) -> list[int]:
@@ -114,7 +126,13 @@ def _mark_workspace_402(job_id: str, workspace_id: str, message: str) -> None:
         job["failed"] = sum(1 for item in job["items"] if item.get("status") == "failed")
 
 
-def _new_job(kind: str, account_ids: list[int]) -> dict:
+def _new_job(
+    kind: str,
+    account_ids: list[int],
+    *,
+    auto_relogin_on_401: bool = False,
+    source: str = "manual",
+) -> dict:
     if not account_ids:
         raise HTTPException(400, "请选择至少一个账号")
     settings = db.get_settings()
@@ -127,6 +145,8 @@ def _new_job(kind: str, account_ids: list[int]) -> dict:
         job = {
             "id": job_id,
             "kind": kind,
+            "source": source,
+            "auto_relogin_on_401": bool(auto_relogin_on_401),
             "status": "queued",
             "total": len(account_ids),
             "done": 0,
@@ -147,16 +167,158 @@ def _new_job(kind: str, account_ids: list[int]) -> dict:
     return _job_snapshot(job)
 
 
+def _relogin_with_retries(
+    account: dict,
+    settings: dict,
+    *,
+    initial_exclude_proxy: str = "",
+) -> dict:
+    """执行一次账号重登录，返回统一结果；调用方负责写入任务进度。"""
+    account_id = int(account.get("id") or 0)
+    workspace_id = str(account.get("chatgpt_account_id") or "").strip()
+    previous_proxy = str(initial_exclude_proxy or "").strip()
+    last_error = ""
+    for attempt in range(1, settings["retry_count"] + 2):
+        proxy, proxy_index, lease_count = db.lease_proxy(exclude=previous_proxy)
+        try:
+            refreshed = engine.relogin_account(
+                account,
+                proxy=proxy,
+                login_timeout=settings["login_timeout"],
+            )
+            with _jobs_lock:
+                if workspace_id and workspace_id in _workspace_402:
+                    return {
+                        "ok": False,
+                        "status": "402",
+                        "error": f"workspace {workspace_id} 已因其他账号 HTTP 402 停用",
+                        "attempts": attempt,
+                        "proxy": proxy,
+                        "proxy_index": proxy_index,
+                        "proxy_lease_count": lease_count,
+                        "workspace_id": workspace_id,
+                    }
+            return {
+                "ok": True,
+                "status": "revived",
+                "account": refreshed,
+                "attempts": attempt,
+                "proxy": proxy,
+                "proxy_index": proxy_index,
+                "proxy_lease_count": lease_count,
+            }
+        except engine.AccountDeactivated as exc:
+            code = int(exc.status_code or 0)
+            last_error = str(exc)
+            if code == 402:
+                return {
+                    "ok": False,
+                    "status": "402",
+                    "error": last_error,
+                    "attempts": attempt,
+                    "proxy": proxy,
+                    "proxy_index": proxy_index,
+                    "proxy_lease_count": lease_count,
+                    "workspace_id": workspace_id,
+                }
+            if code == 403:
+                return {
+                    "ok": False,
+                    "status": "403",
+                    "error": last_error,
+                    "attempts": attempt,
+                    "proxy": proxy,
+                    "proxy_index": proxy_index,
+                    "proxy_lease_count": lease_count,
+                }
+            return {
+                "ok": False,
+                "status": "deactivated",
+                "error": last_error,
+                "attempts": attempt,
+                "proxy": proxy,
+                "proxy_index": proxy_index,
+                "proxy_lease_count": lease_count,
+            }
+        except Exception as exc:  # noqa: BLE001
+            status_code = engine.http_status_code(exc)
+            last_error = str(exc)[:500]
+            if status_code in (402, 403):
+                return {
+                    "ok": False,
+                    "status": str(status_code),
+                    "error": f"账号停用/不可用 HTTP {status_code}: {last_error[:300]}",
+                    "attempts": attempt,
+                    "proxy": proxy,
+                    "proxy_index": proxy_index,
+                    "proxy_lease_count": lease_count,
+                    "workspace_id": workspace_id,
+                }
+        previous_proxy = proxy
+        if attempt <= settings["retry_count"]:
+            time.sleep(min(2.0 * attempt, 5.0))
+    return {
+        "ok": False,
+        "status": "error",
+        "error": last_error or "重试耗尽",
+        "attempts": settings["retry_count"] + 1,
+        "workspace_id": workspace_id,
+    }
+
+
+def _apply_relogin_result(job_id: str, index: int, account: dict, result: dict) -> None:
+    account_id = int(account.get("id") or 0)
+    status = str(result.get("status") or "error")
+    error = str(result.get("error") or "")
+    common = {
+        "attempts": result.get("attempts", 0),
+        "proxy": result.get("proxy", ""),
+        "proxy_index": result.get("proxy_index", -1),
+        "proxy_lease_count": result.get("proxy_lease_count", 0),
+    }
+    if status == "revived" and result.get("account"):
+        refreshed = result["account"]
+        db.update_account(
+            account_id,
+            **{key: refreshed.get(key, "") for key in (
+                "access_token", "refresh_token", "id_token", "session_token", "device_id",
+                "chatgpt_account_id", "chatgpt_user_id", "client_id", "organization_id", "plan_type",
+            )},
+            status="revived",
+            last_error="",
+            last_relogin_at=time.time(),
+        )
+        _set_item(job_id, index, status="success", error="", account=refreshed, **common)
+        return
+    if status == "402":
+        workspace = str(result.get("workspace_id") or account.get("chatgpt_account_id") or "").strip()
+        if workspace:
+            _mark_workspace_402(job_id, workspace, error or f"账号停用/不可用 HTTP 402")
+        else:
+            db.update_account(account_id, status="402", last_error=error, last_checked_at=time.time())
+            _set_item(job_id, index, status="failed", error=error, **common)
+        return
+    db.update_account(
+        account_id,
+        status=status if status in {"403", "deactivated"} else "error",
+        last_error=error,
+        last_checked_at=time.time(),
+    )
+    _set_item(job_id, index, status="failed", error=error or "重登录失败", **common)
+
+
 def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
     settings = db.get_settings()
     _set_job(job_id, status="running", started_at=time.time())
+
+    auto_relogin_on_401 = bool(_jobs.get(job_id, {}).get("auto_relogin_on_401"))
 
     def one(index: int, account_id: int) -> None:
         account = db.get_account(account_id)
         if not account:
             _set_item(job_id, index, status="failed", error="账号不存在", attempts=1)
             return
-        _set_item(job_id, index, status="running", email=account["email"])
+        _set_item(job_id, index, status="running", email=account["email"], phase=kind)
         workspace_id = str(account.get("chatgpt_account_id") or "").strip()
         with _jobs_lock:
             workspace_already_402 = bool(workspace_id and workspace_id in _workspace_402)
@@ -165,20 +327,13 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
             db.update_account(account_id, status="402", last_error=message, last_checked_at=time.time())
             _set_item(job_id, index, status="failed", error=message, attempts=0)
             return
-        last_error = ""
-        previous_proxy = ""
-        for attempt in range(1, settings["retry_count"] + 2):
-            proxy, proxy_index, lease_count = db.lease_proxy(exclude=previous_proxy)
-            _set_item(
-                job_id,
-                index,
-                attempts=attempt,
-                proxy=proxy,
-                proxy_index=proxy_index,
-                proxy_lease_count=lease_count,
-            )
-            try:
-                if kind == "quota":
+
+        if kind == "quota":
+            previous_proxy = ""
+            for attempt in range(1, settings["retry_count"] + 2):
+                proxy, proxy_index, lease_count = db.lease_proxy(exclude=previous_proxy)
+                _set_item(job_id, index, attempts=attempt, proxy=proxy, proxy_index=proxy_index, proxy_lease_count=lease_count, phase="quota")
+                try:
                     quota = engine.fetch_quota(account, proxy=proxy, timeout=settings["quota_timeout"])
                     with _jobs_lock:
                         workspace_marked = bool(workspace_id and workspace_id in _workspace_402)
@@ -190,68 +345,45 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                     db.update_account(account_id, status="active", quota=quota, last_error="", last_checked_at=time.time())
                     _set_item(job_id, index, status="success", quota=quota, error="")
                     return
-                refreshed = engine.relogin_account(account, proxy=proxy, login_timeout=settings["login_timeout"])
-                with _jobs_lock:
-                    workspace_marked = bool(workspace_id and workspace_id in _workspace_402)
-                if workspace_marked:
-                    message = f"workspace {workspace_id} 已因其他账号 HTTP 402 停用"
-                    db.update_account(account_id, status="402", last_error=message, last_checked_at=time.time())
-                    _set_item(job_id, index, status="failed", error=message)
+                except engine.QuotaUnauthorized as exc:
+                    last_error = str(exc)
+                    db.update_account(account_id, status="401", last_error=last_error, last_checked_at=time.time())
+                    if auto_relogin_on_401:
+                        _set_item(job_id, index, phase="relogin", error="检测到 401，立即重登录")
+                        relogin_result = _relogin_with_retries(account, settings, initial_exclude_proxy=proxy)
+                        _apply_relogin_result(job_id, index, account, relogin_result)
+                    else:
+                        _set_item(job_id, index, status="failed", error=last_error)
                     return
-                db.update_account(
-                    account_id,
-                    **{key: refreshed.get(key, "") for key in (
-                        "access_token", "refresh_token", "id_token", "session_token",
-                        "device_id", "chatgpt_account_id", "chatgpt_user_id", "client_id", "organization_id", "plan_type",
-                    )},
-                    status="revived",
-                    last_error="",
-                    last_relogin_at=time.time(),
-                )
-                _set_item(job_id, index, status="success", error="", account=refreshed)
-                return
-            except engine.AccountDeactivated as exc:
-                last_error = str(exc)
-                code = int(exc.status_code or 0)
-                if code == 402:
-                    if workspace_id:
+                except engine.AccountDeactivated as exc:
+                    last_error = str(exc)
+                    if int(exc.status_code or 0) == 402 and workspace_id:
                         _mark_workspace_402(job_id, workspace_id, last_error)
-                        logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
                     else:
-                        db.update_account(account_id, status="402", last_error=last_error, last_checked_at=time.time())
+                        status = str(exc.status_code) if int(exc.status_code or 0) == 403 else "deactivated"
+                        db.update_account(account_id, status=status, last_error=last_error, last_checked_at=time.time())
                         _set_item(job_id, index, status="failed", error=last_error)
-                else:
-                    status = str(code) if code == 403 else "deactivated"
-                    db.update_account(account_id, status=status, last_error=last_error, last_checked_at=time.time())
-                    _set_item(job_id, index, status="failed", error=last_error)
-                return
-            except engine.QuotaUnauthorized as exc:
-                last_error = str(exc)
-                db.update_account(account_id, status="401", last_error=last_error, last_checked_at=time.time())
-                if kind == "quota":
-                    _set_item(job_id, index, status="failed", error=last_error)
                     return
-            except Exception as exc:  # noqa: BLE001
-                status_code = engine.http_status_code(exc)
-                if status_code in (402, 403):
-                    last_error = f"账号停用/不可用 HTTP {status_code}: {str(exc)[:300]}"
-                    if status_code == 402:
-                        if workspace_id:
+                except Exception as exc:  # noqa: BLE001
+                    status_code = engine.http_status_code(exc)
+                    if status_code in (402, 403):
+                        last_error = f"账号停用/不可用 HTTP {status_code}: {str(exc)[:300]}"
+                        if status_code == 402 and workspace_id:
                             _mark_workspace_402(job_id, workspace_id, last_error)
-                            logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
                         else:
-                            db.update_account(account_id, status="402", last_error=last_error, last_checked_at=time.time())
+                            db.update_account(account_id, status=str(status_code), last_error=last_error, last_checked_at=time.time())
                             _set_item(job_id, index, status="failed", error=last_error)
-                    else:
-                        db.update_account(account_id, status="403", last_error=last_error, last_checked_at=time.time())
-                        _set_item(job_id, index, status="failed", error=last_error)
-                    return
-                last_error = str(exc)[:500]
-            previous_proxy = proxy
-            if attempt <= settings["retry_count"]:
-                time.sleep(min(2.0 * attempt, 5.0))
-        db.update_account(account_id, status="error", last_error=last_error, last_checked_at=time.time())
-        _set_item(job_id, index, status="failed", error=last_error or "重试耗尽")
+                        return
+                    last_error = str(exc)[:500]
+                previous_proxy = proxy
+                if attempt <= settings["retry_count"]:
+                    time.sleep(min(2.0 * attempt, 5.0))
+            db.update_account(account_id, status="error", last_error=last_error, last_checked_at=time.time())
+            _set_item(job_id, index, status="failed", error=last_error or "重试耗尽")
+            return
+
+        relogin_result = _relogin_with_retries(account, settings)
+        _apply_relogin_result(job_id, index, account, relogin_result)
 
     with ThreadPoolExecutor(max_workers=max(1, min(settings["concurrency"], len(account_ids))), thread_name_prefix=f"401-{kind}") as executor:
         futures = [executor.submit(one, index, account_id) for index, account_id in enumerate(account_ids)]
@@ -264,6 +396,133 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
     snapshot = _jobs.get(job_id, {})
     status = "done" if snapshot.get("failed", 0) == 0 else "done_with_errors"
     _set_job(job_id, status=status, finished_at=time.time())
+
+
+def _inspection_snapshot() -> dict:
+    with _inspection_lock:
+        state = dict(_inspection_state)
+    state["settings"] = db.get_settings()
+    state["next_run_in_seconds"] = max(0, int(state.get("next_run_at", 0) - time.time())) if state.get("next_run_at") else 0
+    return state
+
+
+def _inspection_candidates(batch_size: int) -> list[int]:
+    rows = [
+        row for row in db.list_accounts()
+        if row.get("access_token")
+        and str(row.get("status") or "") not in {"402", "403", "deactivated"}
+    ]
+    rows.sort(key=lambda row: (float(row.get("last_checked_at") or 0), int(row.get("id") or 0)))
+    return [int(row["id"]) for row in rows[:max(1, int(batch_size or 8))]]
+
+
+def _inspection_loop(stop: threading.Event) -> None:
+    logger.info("独立自动401巡检线程启动")
+    try:
+        while not stop.is_set():
+            settings = db.get_settings()
+            batch = _inspection_candidates(settings["inspection_batch_size"])
+            if not batch:
+                with _inspection_lock:
+                    _inspection_state["last_error"] = "没有可巡检的账号（账号需有 access_token 且未停用）"
+                    _inspection_state["current_job_id"] = ""
+                    _inspection_state["next_run_at"] = time.time() + settings["inspection_interval_minutes"] * 60
+                stop.wait(settings["inspection_interval_minutes"] * 60)
+                continue
+            try:
+                job = _new_job(
+                    "quota",
+                    batch,
+                    auto_relogin_on_401=settings["inspection_auto_relogin"],
+                    source="scheduled_inspection",
+                )
+                with _inspection_lock:
+                    _inspection_state["current_job_id"] = job["id"]
+                    _inspection_state["last_job_id"] = job["id"]
+                    _inspection_state["last_batch"] = len(batch)
+                    _inspection_state["last_error"] = ""
+                while not stop.is_set():
+                    with _jobs_lock:
+                        current = _jobs.get(job["id"])
+                        status = current.get("status") if current else "done_with_errors"
+                    if status not in {"queued", "running"}:
+                        break
+                    stop.wait(1)
+                with _inspection_lock:
+                    _inspection_state["current_job_id"] = ""
+                    _inspection_state["round"] = int(_inspection_state.get("round") or 0) + 1
+            except HTTPException as exc:
+                with _inspection_lock:
+                    _inspection_state["last_error"] = str(exc.detail or exc)
+                stop.wait(5)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("独立自动401巡检批次失败")
+                with _inspection_lock:
+                    _inspection_state["last_error"] = str(exc)[:500]
+                stop.wait(5)
+                continue
+            settings = db.get_settings()
+            with _inspection_lock:
+                _inspection_state["next_run_at"] = time.time() + settings["inspection_interval_minutes"] * 60
+            stop.wait(settings["inspection_interval_minutes"] * 60)
+    finally:
+        with _inspection_lock:
+            if _inspection_stop is stop:
+                _inspection_state["running"] = False
+                _inspection_state["current_job_id"] = ""
+                _inspection_state["next_run_at"] = 0.0
+        logger.info("独立自动401巡检线程结束")
+
+
+def _start_inspection(*, persist: bool = True) -> dict:
+    global _inspection_stop, _inspection_thread
+    with _inspection_lock:
+        if _inspection_thread and _inspection_thread.is_alive():
+            return _inspection_snapshot()
+        if persist:
+            db.save_settings({"inspection_enabled": "1"})
+        stop = threading.Event()
+        _inspection_stop = stop
+        _inspection_state.update({
+            "running": True,
+            "round": 0,
+            "last_batch": 0,
+            "next_run_at": time.time(),
+            "current_job_id": "",
+            "last_job_id": "",
+            "last_error": "",
+        })
+        thread = threading.Thread(target=_inspection_loop, args=(stop,), daemon=True, name="standalone-401-inspection")
+        _inspection_thread = thread
+        thread.start()
+    return _inspection_snapshot()
+
+
+def _stop_inspection(*, persist: bool = True) -> dict:
+    global _inspection_stop, _inspection_thread
+    with _inspection_lock:
+        if persist:
+            db.save_settings({"inspection_enabled": "0"})
+        stop = _inspection_stop
+        _inspection_stop = None
+        _inspection_thread = None
+        _inspection_state.update({"running": False, "current_job_id": "", "next_run_at": 0.0})
+    if stop:
+        stop.set()
+    return _inspection_snapshot()
+
+
+@app.on_event("startup")
+def _restore_inspection_on_startup() -> None:
+    if db.get_settings().get("inspection_enabled"):
+        _start_inspection(persist=False)
+
+
+@app.on_event("shutdown")
+def _stop_inspection_on_shutdown() -> None:
+    _stop_inspection(persist=False)
+    _job_executor.shutdown(wait=False, cancel_futures=True)
 
 
 class ImportRequest(BaseModel):
@@ -284,6 +543,9 @@ class SettingsRequest(BaseModel):
     quota_timeout: Optional[int] = Field(None, ge=5, le=120)
     login_timeout: Optional[int] = Field(None, ge=30, le=900)
     retry_count: Optional[int] = Field(None, ge=0, le=5)
+    inspection_batch_size: Optional[int] = Field(None, ge=1, le=500)
+    inspection_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    inspection_auto_relogin: Optional[bool] = None
 
 
 def _parse_password_2fa(text: str) -> list[dict]:
@@ -425,6 +687,36 @@ def start_check(req: IdsRequest) -> dict:
 @app.post("/api/relogin")
 def start_relogin(req: IdsRequest) -> dict:
     return {"ok": True, "job": _new_job("relogin", _account_ids_or_all(req.account_ids))}
+
+
+@app.get("/api/inspection")
+def inspection_status() -> dict:
+    return {"ok": True, "inspection": _inspection_snapshot()}
+
+
+class InspectionRequest(BaseModel):
+    batch_size: Optional[int] = Field(None, ge=1, le=500)
+    interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    auto_relogin: Optional[bool] = None
+
+
+@app.post("/api/inspection/start")
+def start_inspection(req: InspectionRequest) -> dict:
+    values = {}
+    if req.batch_size is not None:
+        values["inspection_batch_size"] = req.batch_size
+    if req.interval_minutes is not None:
+        values["inspection_interval_minutes"] = req.interval_minutes
+    if req.auto_relogin is not None:
+        values["inspection_auto_relogin"] = "1" if req.auto_relogin else "0"
+    if values:
+        db.save_settings(values)
+    return {"ok": True, "inspection": _start_inspection()}
+
+
+@app.post("/api/inspection/stop")
+def stop_inspection() -> dict:
+    return {"ok": True, "inspection": _stop_inspection()}
 
 
 @app.get("/api/jobs")

@@ -64,7 +64,11 @@ def init_db() -> None:
                 ('concurrency', '4'),
                 ('quota_timeout', '30'),
                 ('login_timeout', '180'),
-                ('retry_count', '1');
+                ('retry_count', '1'),
+                ('inspection_enabled', '0'),
+                ('inspection_batch_size', '8'),
+                ('inspection_interval_minutes', '5'),
+                ('inspection_auto_relogin', '1');
             """
         )
         account_columns = {
@@ -300,7 +304,10 @@ def get_setting(key: str, default: str = "") -> str:
 
 
 def save_settings(values: dict) -> dict:
-    allowed = {"concurrency", "quota_timeout", "login_timeout", "retry_count"}
+    allowed = {
+        "concurrency", "quota_timeout", "login_timeout", "retry_count",
+        "inspection_enabled", "inspection_batch_size", "inspection_interval_minutes", "inspection_auto_relogin",
+    }
     with _lock:
         con = _conn()
         for key, value in values.items():
@@ -320,6 +327,10 @@ def get_settings() -> dict:
         "quota_timeout": max(5, min(120, int(get_setting("quota_timeout", "30") or 30))),
         "login_timeout": max(30, min(900, int(get_setting("login_timeout", "180") or 180))),
         "retry_count": max(0, min(5, int(get_setting("retry_count", "1") or 1))),
+        "inspection_enabled": get_setting("inspection_enabled", "0").strip().lower() in {"1", "true", "yes", "on"},
+        "inspection_batch_size": max(1, min(500, int(get_setting("inspection_batch_size", "8") or 8))),
+        "inspection_interval_minutes": max(1, min(1440, int(get_setting("inspection_interval_minutes", "5") or 5))),
+        "inspection_auto_relogin": get_setting("inspection_auto_relogin", "1").strip().lower() in {"1", "true", "yes", "on"},
     }
 
 

@@ -234,6 +234,70 @@ class StandaloneTests(unittest.TestCase):
         self.assertEqual(refreshed["device_id"], "device-new")
         self.assertEqual(refreshed["chatgpt_account_id"], "workspace-new")
 
+    def test_inspection_candidates_choose_oldest_checked_accounts(self):
+        first = db.upsert_account({"email": "one@example.com", "access_token": "at-1"})
+        second = db.upsert_account({"email": "two@example.com", "access_token": "at-2"})
+        db.upsert_account({"email": "three@example.com", "access_token": "at-3", "status": "402"})
+        db.update_account(first["id"], last_checked_at=300)
+        db.update_account(second["id"], last_checked_at=100)
+        self.assertEqual(app._inspection_candidates(2), [second["id"], first["id"]])
+
+    def test_job_can_mark_quota_401_for_immediate_relogin(self):
+        row = db.upsert_account({"email": "scheduled@example.com", "access_token": "at"})
+        with mock.patch.object(app._job_executor, "submit"):
+            job = app._new_job("quota", [row["id"]], auto_relogin_on_401=True, source="scheduled_inspection")
+        self.assertTrue(job["auto_relogin_on_401"])
+        self.assertEqual(job["source"], "scheduled_inspection")
+        with app._jobs_lock:
+            app._jobs.pop(job["id"], None)
+
+    def test_auto_inspection_relogs_immediately_after_quota_401(self):
+        row = db.upsert_account({
+            "email": "scheduled@example.com",
+            "access_token": "old-at",
+            "password": "pass",
+            "totp_secret": "totp",
+        })
+        job = {
+            "id": "inspection-job",
+            "kind": "quota",
+            "auto_relogin_on_401": True,
+            "items": [{"account_id": row["id"], "status": "pending"}],
+            "done": 0,
+            "success": 0,
+            "failed": 0,
+        }
+        with app._jobs_lock:
+            app._jobs[job["id"]] = job
+
+        refreshed = {
+            "email": row["email"],
+            "access_token": "new-at",
+            "refresh_token": "new-rt",
+            "id_token": "new-id",
+            "session_token": "new-st",
+            "device_id": "new-device",
+            "chatgpt_account_id": "",
+            "chatgpt_user_id": "user",
+            "client_id": engine.CODEX_CLIENT_ID,
+            "organization_id": "org",
+            "plan_type": "team",
+        }
+        settings = db.get_settings()
+        settings["retry_count"] = 0
+        with (
+            mock.patch.object(app.db, "get_settings", return_value=settings),
+            mock.patch.object(app.db, "lease_proxy", return_value=("", -1, 0)),
+            mock.patch.object(app.engine, "fetch_quota", side_effect=engine.QuotaUnauthorized("HTTP 401")),
+            mock.patch.object(app.engine, "relogin_account", return_value=refreshed) as relogin,
+        ):
+            app._run_job(job["id"], "quota", [row["id"]])
+        self.assertEqual(relogin.call_count, 1)
+        self.assertEqual(db.get_account(row["id"])["status"], "revived")
+        self.assertEqual(job["success"], 1)
+        with app._jobs_lock:
+            app._jobs.pop(job["id"], None)
+
 
 if __name__ == "__main__":
     unittest.main()
