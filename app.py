@@ -48,6 +48,7 @@ app.add_middleware(
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.RLock()
 _job_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="standalone-401-job")
+_workspace_402: set[str] = set()
 
 
 def _clean_ids(values: Optional[list[Any]]) -> list[int]:
@@ -86,6 +87,26 @@ def _set_item(job_id: str, index: int, **values: Any) -> None:
         job["items"][index].update(values)
         done = sum(1 for item in job["items"] if item.get("status") in {"success", "failed"})
         job["done"] = done
+        job["success"] = sum(1 for item in job["items"] if item.get("status") == "success")
+        job["failed"] = sum(1 for item in job["items"] if item.get("status") == "failed")
+
+
+def _mark_workspace_402(job_id: str, workspace_id: str, message: str) -> None:
+    """402 是 workspace 级停用：同步标记同 workspace 的所有账号。"""
+    workspace = str(workspace_id or "").strip()
+    if not workspace:
+        return
+    affected = db.mark_workspace_accounts(workspace, status="402", error=message)
+    with _jobs_lock:
+        _workspace_402.add(workspace)
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        affected_set = set(affected)
+        for item in job.get("items", []):
+            if int(item.get("account_id") or 0) in affected_set:
+                item.update({"status": "failed", "error": message})
+        job["done"] = sum(1 for item in job["items"] if item.get("status") in {"success", "failed"})
         job["success"] = sum(1 for item in job["items"] if item.get("status") == "success")
         job["failed"] = sum(1 for item in job["items"] if item.get("status") == "failed")
 
@@ -133,6 +154,14 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
             _set_item(job_id, index, status="failed", error="账号不存在", attempts=1)
             return
         _set_item(job_id, index, status="running", email=account["email"])
+        workspace_id = str(account.get("chatgpt_account_id") or "").strip()
+        with _jobs_lock:
+            workspace_already_402 = bool(workspace_id and workspace_id in _workspace_402)
+        if workspace_already_402:
+            message = f"workspace {workspace_id} 已因其他账号 HTTP 402 停用"
+            db.update_account(account_id, status="402", last_error=message, last_checked_at=time.time())
+            _set_item(job_id, index, status="failed", error=message, attempts=0)
+            return
         last_error = ""
         previous_proxy = ""
         for attempt in range(1, settings["retry_count"] + 2):
@@ -166,8 +195,14 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                 return
             except engine.AccountDeactivated as exc:
                 last_error = str(exc)
-                db.update_account(account_id, status="deactivated", last_error=last_error, last_checked_at=time.time())
-                _set_item(job_id, index, status="failed", error=last_error)
+                code = int(exc.status_code or 0)
+                if code == 402:
+                    _mark_workspace_402(job_id, workspace_id, last_error)
+                    logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                else:
+                    status = str(code) if code == 403 else "deactivated"
+                    db.update_account(account_id, status=status, last_error=last_error, last_checked_at=time.time())
+                    _set_item(job_id, index, status="failed", error=last_error)
                 return
             except engine.QuotaUnauthorized as exc:
                 last_error = str(exc)
@@ -176,6 +211,16 @@ def _run_job(job_id: str, kind: str, account_ids: list[int]) -> None:
                     _set_item(job_id, index, status="failed", error=last_error)
                     return
             except Exception as exc:  # noqa: BLE001
+                status_code = engine.http_status_code(exc)
+                if status_code in (402, 403):
+                    last_error = f"账号停用/不可用 HTTP {status_code}: {str(exc)[:300]}"
+                    if status_code == 402:
+                        _mark_workspace_402(job_id, workspace_id, last_error)
+                        logger.warning("workspace=%s 因账号=%s HTTP 402，已批量标记关联账号", workspace_id, account.get("email"))
+                    else:
+                        db.update_account(account_id, status="403", last_error=last_error, last_checked_at=time.time())
+                        _set_item(job_id, index, status="failed", error=last_error)
+                    return
                 last_error = str(exc)[:500]
             previous_proxy = proxy
             if attempt <= settings["retry_count"]:
@@ -281,7 +326,13 @@ def import_accounts(req: ImportRequest) -> dict:
     rows = _parse_password_2fa(req.text) if kind in {"password_2fa", "password+2fa", "pwd2fa"} else _parse_sub2(req.text)
     imported = 0
     for row in rows:
-        db.upsert_account(row)
+        stored = db.upsert_account(row)
+        workspace = str(stored.get("chatgpt_account_id") or row.get("chatgpt_account_id") or "").strip()
+        if workspace:
+            with _jobs_lock:
+                # 重新导入新的凭证是用户明确的恢复动作，允许该 workspace
+                # 再次参与任务；否则旧的 402 进程标记会永久拦截重试。
+                _workspace_402.discard(workspace)
         imported += 1
     return {"ok": True, "imported": imported, "items": db.list_accounts()}
 

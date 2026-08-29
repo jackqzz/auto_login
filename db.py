@@ -180,6 +180,27 @@ def update_account(account_id: int, **values: Any) -> dict | None:
     return row
 
 
+def mark_workspace_accounts(workspace_id: str, *, status: str, error: str) -> list[int]:
+    """将同一 workspace/account id 的账号原子标记为停用状态。"""
+    workspace = str(workspace_id or "").strip()
+    if not workspace:
+        return []
+    now = time.time()
+    with _lock:
+        con = _conn()
+        rows = con.execute(
+            "SELECT id FROM accounts WHERE chatgpt_account_id=?",
+            (workspace,),
+        ).fetchall()
+        con.execute(
+            "UPDATE accounts SET status=?,last_error=?,last_checked_at=?,updated_at=? WHERE chatgpt_account_id=?",
+            (str(status), str(error or "")[:500], now, now, workspace),
+        )
+        con.commit()
+        con.close()
+    return [int(row[0]) for row in rows]
+
+
 def delete_account(account_id: int) -> bool:
     with _lock:
         con = _conn()

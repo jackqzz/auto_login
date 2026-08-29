@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -150,6 +151,22 @@ class QuotaUnauthorized(RuntimeError):
 class AccountDeactivated(RuntimeError):
     """账号被停用或永久失效。"""
 
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = int(status_code or 0) or None
+
+
+def http_status_code(error: BaseException) -> int | None:
+    """从 AuthFlow/HTTP 客户端异常中提取状态码。"""
+    explicit = getattr(error, "status_code", None)
+    try:
+        if int(explicit or 0) in {402, 403}:
+            return int(explicit)
+    except (TypeError, ValueError):
+        pass
+    match = re.search(r"\b(402|403)\b", str(error or ""))
+    return int(match.group(1)) if match else None
+
 
 def _looks_deactivated(body: str) -> bool:
     lower = str(body or "").lower()
@@ -173,8 +190,11 @@ def fetch_quota(account: dict, *, proxy: str = "", timeout: int = 30) -> dict:
         body = _text(getattr(response, "text", ""))[:1000]
         if response.status_code == 401:
             raise QuotaUnauthorized("额度查询失败 HTTP 401")
-        if response.status_code == 403 or _looks_deactivated(body):
-            raise AccountDeactivated(f"账号停用/不可用 HTTP {response.status_code}")
+        if response.status_code in (402, 403) or _looks_deactivated(body):
+            raise AccountDeactivated(
+                f"账号停用/不可用 HTTP {response.status_code}",
+                status_code=response.status_code,
+            )
         raise RuntimeError(f"额度查询失败 HTTP {response.status_code}: {body[:300]}")
     payload = response.json()
     rate = payload.get("rate_limit") or {}
@@ -250,7 +270,16 @@ def relogin_account(account: dict, *, proxy: str = "", login_timeout: int = 180,
         personal_only=False,
     )
     flow.result.totp_secret = totp_secret
-    result = flow.run_protocol_login(_NoOtpMailProvider(email), email, password=password)
+    try:
+        result = flow.run_protocol_login(_NoOtpMailProvider(email), email, password=password)
+    except Exception as exc:  # noqa: BLE001
+        status_code = http_status_code(exc)
+        if status_code in (402, 403):
+            raise AccountDeactivated(
+                f"账号停用/不可用 HTTP {status_code}: {str(exc)[:300]}",
+                status_code=status_code,
+            ) from exc
+        raise
     data = result.to_dict()
     data.update({"email": email, "password": password, "totp_secret": totp_secret})
     refreshed = normalized_account({**cred, **data})

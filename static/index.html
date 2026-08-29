@@ -147,11 +147,11 @@
     return response.json()
   }
   function selectedIds() { return [...state.selected].filter((id) => state.accounts.some((row) => row.id === id)) }
-  function statusTag(status) { const map = { imported:['待检查',''], active:['存活','ok'], revived:['已复活','ok'], '401':['401','bad'], deactivated:['已停用','bad'], error:['错误','bad'] }; const value = map[status] || [status || '未知','warn']; return `<span class="tag ${value[1]}">${esc(value[0])}</span>` }
+  function statusTag(status) { const map = { imported:['待检查',''], active:['存活','ok'], revived:['已复活','ok'], '401':['401','bad'], '402':['402 · Workspace停用','bad'], '403':['403 · 已停用','bad'], deactivated:['已停用','bad'], error:['错误','bad'] }; const value = map[status] || [status || '未知','warn']; return `<span class="tag ${value[1]}">${esc(value[0])}</span>` }
   function formatQuota(quota) { if (!quota || typeof quota !== 'object' || !Object.keys(quota).length) return '<span class="hint">—</span>'; const primary = quota.primary || {}; const balance = quota.credits_balance == null ? '' : `余额 ${quota.credits_balance}`; const used = primary.used_percent == null ? '' : `主窗口 ${primary.used_percent}%`; return esc([balance, used].filter(Boolean).join(' · ') || '已返回') }
   function render() {
     const counts = state.accounts.reduce((out, row) => { out.total++; out[row.status] = (out[row.status] || 0) + 1; return out }, { total: 0 })
-    $('stats').innerHTML = [['总数', counts.total], ['存活', (counts.active || 0) + (counts.revived || 0)], ['401', counts['401'] || 0], ['停用', counts.deactivated || 0], ['已选', selectedIds().length]].map(([name, value]) => `<div class="stat">${name}<b>${value}</b></div>`).join('')
+    $('stats').innerHTML = [['总数', counts.total], ['存活', (counts.active || 0) + (counts.revived || 0)], ['401', counts['401'] || 0], ['402', counts['402'] || 0], ['403', counts['403'] || 0], ['停用', counts.deactivated || 0], ['已选', selectedIds().length]].map(([name, value]) => `<div class="stat">${name}<b>${value}</b></div>`).join('')
     $('accountRows').innerHTML = state.accounts.map((row) => `<tr>
       <td><input type="checkbox" data-select="${row.id}" ${state.selected.has(row.id) ? 'checked' : ''}></td>
       <td>${statusTag(row.status)}</td>
